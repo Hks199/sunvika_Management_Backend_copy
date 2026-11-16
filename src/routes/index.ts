@@ -3,7 +3,7 @@ import { announcementRouter } from '../modules/announcements/announcement.routes
 import { queryRouter, notificationRouter } from '../modules/queries/query.routes.js';
 import { Router } from 'express';
 import mongoose from 'mongoose';
-import { APP_NAME } from '../constants/app.constants.js';
+import { APP_NAME, API_VERSION } from '../constants/app.constants.js';
 import { sendSuccess } from '../utils/api-response.util.js';
 import { authRouter } from '../modules/auth/routes/auth.routes.js';
 import { employeeRouter } from '../modules/employees/routes/employee.routes.js';
@@ -23,6 +23,11 @@ import { callingListRouter } from '../modules/calling-lists/calling-list.routes.
 
 import {cpReminderRouter,pushDeviceRouter} from '../modules/cp-reminders/cp-reminders.routes.js';
 export const apiRouter = Router();
+apiRouter.get('/', (req, res) => sendSuccess(res, 'Welcome to the Sunvika Management API', {
+  service: APP_NAME,
+  version: API_VERSION,
+  health: `${req.baseUrl}/health`
+}));
 apiRouter.use('/cp-reminders',cpReminderRouter);
 apiRouter.use('/push-devices',pushDeviceRouter);
 

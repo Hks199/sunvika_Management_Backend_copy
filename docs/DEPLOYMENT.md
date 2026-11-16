@@ -2,43 +2,35 @@
 
 ## EC2 deployment with GitHub Actions
 
-The `main` branch workflow in [`.github/workflows/deploy.yaml`](../.github/workflows/deploy.yaml) runs `npm test` and, on success, transfers the source to EC2 and runs Docker Compose. It writes `.env.production` on EC2 over the encrypted SSH connection using the configured GitHub Actions secrets and variables. Local `.env` files are never included in the release archive.
+The main-branch workflow in [deploy.yaml](../.github/workflows/deploy.yaml) runs the tests, builds the Docker image on GitHub, and transfers the image and tracked source to EC2. The 1 GB EC2 instance does not compile TypeScript.
 
-### One-time EC2 setup
+The live server is Ubuntu at `3.26.18.73`, with the application in `/opt/sunvika-backend`. The public API is `https://sunvikamanagementhub.sunvika.in/api/v1`. DNS must point to this instance and its security group must allow ports 80 and 443. Restrict port 22 to trusted deployment sources.
 
-1. Point an `A` record for `sunvikamanagement.niakylie.com` to the instance's public IPv4 address. Allow inbound TCP ports 80 and 443 in the EC2 security group; restrict SSH (port 22) to trusted addresses.
-2. Install Docker Engine with the Docker Compose plugin, and install Certbot on the instance.
-3. Configure GitHub repository **Settings → Secrets and variables → Actions**. The workflow requires these exact names:
+### GitHub Actions configuration
 
-   - **Required secrets:** `EC2_SSH_KEY`, `EC2_KNOWN_HOSTS`, `MONGODB_URI`, `JWT_ACCESS_SECRET`.
-   - **Variables:** `EC2_HOST` (defaults to `18.60.61.219`), `EC2_USER` (defaults to `ubuntu`), `FRONTEND_URL`, `CORS_ORIGINS`, and any desired non-default runtime settings.
-   - `EC2_HOST` is the instance public IP or DNS name. `EC2_SSH_KEY` is the PEM private-key contents, not a local file path. `EC2_KNOWN_HOSTS` is the verified SSH host-key line for the instance.
-   - `MONGODB_URI` must be the full production connection string with its password URL-encoded and TLS enabled. `JWT_ACCESS_SECRET` must be a unique random value of at least 32 characters. Do not send either value in chat or commit them.
-   - The workflow defaults `FRONTEND_URL` and `CORS_ORIGINS` to `https://sunvikamanagementhub.netlify.app`; set the corresponding Actions variables to override them when the frontend domain changes. `FRONTEND_URL` must be the deployed frontend's HTTPS origin (no path), and `CORS_ORIGINS` must contain exact allowed HTTPS origins, comma-separated if needed. `http://localhost:3000` is development-only.
-   - The deploy workflow maps the runtime settings from `.env.example` to Actions values. It defaults `AWS_REGION` to `ap-south-2` and `AWS_S3_BUCKET_NAME` to `sunvika-media`, matching `.env.example`; set these Actions variables to override those defaults. Customer-document and profile-image buckets can instead be set separately with `AWS_S3_CUSTOMER_DOCUMENT_BUCKET` and `AWS_S3_PROFILE_BUCKET`. Both features require an existing private bucket and backend AWS permissions; a successful deploy alone does not verify S3 access.
-   - Store credentials (`MONGODB_URI`, `JWT_ACCESS_SECRET`, `SMTP_PASSWORD`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY`) as **Secrets**. Other runtime settings are **Variables**; `SMTP_USER` and `SMTP_FROM` may be stored as either, with Secrets taking precedence. Optional S3 access keys can be omitted when the instance uses an IAM role. Configure both AWS access-key secrets or neither.
-   - Development-only and one-time bootstrap values (`INITIAL_MD_*`) are intentionally not written to the persistent production environment file. Do not copy real credentials or administrator passwords into `.env.example`; use GitHub Actions Secrets and rotate any credentials that have been exposed.
-4. The TLS certificate must be issued before the first deployment. Port 80 must be reachable from the internet and not already in use:
+Configure repository **Settings ? Secrets and variables ? Actions**:
 
-   ```sh
-   sudo certbot certonly --standalone \
-     --agree-tos --non-interactive \
-     --email YOUR_CERTIFICATE_CONTACT_EMAIL \
-     -d sunvikamanagement.niakylie.com
-   ```
+- Required secrets: `EC2_SSH_KEY` (the PEM private-key contents) and `EC2_KNOWN_HOSTS` (the verified host-key entry for this EC2 instance).
+- Optional variables: `EC2_HOST` (defaults to `3.26.18.73`), `EC2_USER` (defaults to `ubuntu`), and `PUBLIC_API_URL` (defaults to the live HTTPS API URL). Existing variables and secrets override defaults, so remove or correct values referring to the old instance.
+- The SSH user must own the deployment directory and have passwordless sudo for Docker and the release script. The workflow uses `sudo -n`; it does not require membership in the Docker group.
 
-   The Nginx config expects the resulting files under `/etc/letsencrypt/live/sunvikamanagement.niakylie.com/`. Install the included renewal hooks after the first deployment so Certbot can use port 80 and restart Nginx after renewal:
+By default, deployment retains the protected `/opt/sunvika-backend/.env.production` already provisioned on EC2. Database, JWT, SMTP, AWS, and frontend configuration therefore remain intact without duplicating credentials into GitHub. The workflow fails clearly if that file is missing. Source archives contain only Git-tracked files; never commit real credentials.
 
-   ```sh
-   sudo install -m 755 deploy/certbot/stop-nginx.sh \
-     /etc/letsencrypt/renewal-hooks/pre/stop-sunvika-nginx
-   sudo install -m 755 deploy/certbot/start-nginx.sh \
-     /etc/letsencrypt/renewal-hooks/post/start-sunvika-nginx
-   sudo certbot renew --dry-run
-   ```
+To intentionally replace the production environment from GitHub, set the variable `UPDATE_PRODUCTION_ENV=true` and configure all required runtime secrets and variables first. Required secrets for this mode include `MONGODB_URI` and `JWT_ACCESS_SECRET`; also provide `SMTP_PASSWORD` and both AWS access-key secrets when those services use static credentials. All runtime settings written by the workflow replace their EC2 values, including optional settings. `FRONTEND_URL` and comma-separated `CORS_ORIGINS` must be the deployed frontend's HTTPS origins. One-time `INITIAL_MD_*` bootstrap values are never transferred.
 
-   Ensure the instance's Certbot renewal timer is enabled for your installation.
-5. Push the deployment files to `main` or run the workflow manually. GitHub Actions builds the Docker image and transfers it to EC2 over SSH; the instance does not compile the application. The app container is only exposed on the private Compose network; Nginx handles public HTTP-to-HTTPS redirection and proxies HTTPS requests to it.
+The default S3 region is `ap-southeast-2`, and the bucket is `sunvikapvtltd-media`. Keep credentials in Secrets and non-sensitive settings in Variables. Review variable overrides before enabling environment replacement.
+
+### HTTPS and certificate renewal
+
+The existing certificate lives under `/etc/letsencrypt/live/sunvikamanagementhub.sunvika.in/`. Both the certificate and production environment must exist before deployment. Nginx serves ACME challenges from `/opt/sunvika-backend/acme`, which Docker Compose mounts at `/var/www/certbot`. Certificate issuance uses Certbot's webroot mode with that host path.
+
+The release script installs [reload-nginx.sh](../deploy/certbot/reload-nginx.sh) as a Certbot deploy hook and enables `certbot.timer`. Renewal reloads Nginx without stopping it. Do not install the legacy standalone pre/post stop/start hooks for this webroot setup. Test renewal with:
+
+```sh
+sudo certbot renew --dry-run --run-deploy-hooks --no-random-sleep-on-renew
+```
+
+Each release waits for app readiness, recreates Nginx to load the transferred config and the current app IP, and checks the public HTTPS health endpoint. A failed readiness or HTTPS check fails the GitHub job.
 
 ## Container image
 

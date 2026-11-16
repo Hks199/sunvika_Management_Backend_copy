@@ -1,4 +1,4 @@
 #!/bin/sh
 set -eu
 
-docker compose -f /opt/sunvika-management-backend/docker-compose.yml start nginx
+docker compose -f /opt/sunvika-backend/docker-compose.yml start nginx

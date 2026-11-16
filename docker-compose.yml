@@ -20,6 +20,7 @@ services:
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      - ./acme:/var/www/certbot:ro
     restart: unless-stopped
     networks:
       - backend
