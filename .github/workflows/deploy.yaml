@@ -61,7 +61,7 @@ jobs:
           JWT_ACCESS_SECRET: ${{ secrets.JWT_ACCESS_SECRET }}
           JWT_ACCESS_EXPIRES_IN: ${{ vars.JWT_ACCESS_EXPIRES_IN || '15m' }}
           REFRESH_TOKEN_EXPIRES_DAYS: ${{ vars.REFRESH_TOKEN_EXPIRES_DAYS || '30' }}
-          FRONTEND_URL: ${{ vars.FRONTEND_URL || 'https://sunvikamanagementhub.netlify.app' }}
+          FRONTEND_URL: ${{ vars.FRONTEND_URL || 'https://sunvikamanagement.sunvika.in' }}
           CORS_ORIGINS: ${{ vars.CORS_ORIGINS || vars.FRONTEND_URL || 'https://sunvikamanagement.sunvika.in' }}
           SMTP_HOST: ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
           SMTP_PORT: ${{ vars.SMTP_PORT || '587' }}
