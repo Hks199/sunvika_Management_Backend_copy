@@ -1,0 +1,206 @@
+name: Test and deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ec2-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: test
+      PORT: 5000
+      API_PREFIX: /api/v1
+      MONGODB_URI: mongodb://127.0.0.1:27017/sunvika_management
+      JWT_ACCESS_SECRET: test-only-secret-with-at-least-32-characters
+      FRONTEND_URL: http://localhost:3000
+      CORS_ORIGINS: http://localhost:3000
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Deploy to EC2
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST || secrets.EC2_HOST || '18.60.61.219' }}
+          EC2_USER: ${{ vars.EC2_USER || secrets.EC2_USER || 'ubuntu' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS || vars.EC2_KNOWN_HOSTS }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_MAX_POOL_SIZE: ${{ vars.MONGODB_MAX_POOL_SIZE || '50' }}
+          JWT_ACCESS_SECRET: ${{ secrets.JWT_ACCESS_SECRET }}
+          JWT_ACCESS_EXPIRES_IN: ${{ vars.JWT_ACCESS_EXPIRES_IN || '15m' }}
+          REFRESH_TOKEN_EXPIRES_DAYS: ${{ vars.REFRESH_TOKEN_EXPIRES_DAYS || '30' }}
+          FRONTEND_URL: ${{ vars.FRONTEND_URL || 'https://sunvikamanagementhub.netlify.app' }}
+          CORS_ORIGINS: ${{ vars.CORS_ORIGINS || vars.FRONTEND_URL || 'https://sunvikamanagementhub.netlify.app' }}
+          SMTP_HOST: ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT: ${{ vars.SMTP_PORT || '587' }}
+          SMTP_SECURE: ${{ vars.SMTP_SECURE || 'false' }}
+          SMTP_USER: ${{ secrets.SMTP_USER || vars.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM || vars.SMTP_FROM }}
+          BCRYPT_SALT_ROUNDS: ${{ vars.BCRYPT_SALT_ROUNDS || '12' }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-2' }}
+          AWS_S3_BUCKET_NAME: ${{ vars.AWS_S3_BUCKET_NAME || 'sunvika-media' }}
+          AWS_S3_PROFILE_BUCKET: ${{ vars.AWS_S3_PROFILE_BUCKET }}
+          AWS_S3_CUSTOMER_DOCUMENT_BUCKET: ${{ vars.AWS_S3_CUSTOMER_DOCUMENT_BUCKET }}
+          AWS_S3_QUOTATION_BUCKET: ${{ vars.AWS_S3_QUOTATION_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          PROFILE_IMAGE_MAX_SIZE_BYTES: ${{ vars.PROFILE_IMAGE_MAX_SIZE_BYTES || '5242880' }}
+          CUSTOMER_DOCUMENT_MAX_SIZE_BYTES: ${{ vars.CUSTOMER_DOCUMENT_MAX_SIZE_BYTES || '10485760' }}
+          QUOTATION_COMPANY_ADDRESS: ${{ vars.QUOTATION_COMPANY_ADDRESS }}
+          QUOTATION_COMPANY_PHONE: ${{ vars.QUOTATION_COMPANY_PHONE }}
+          QUOTATION_COMPANY_EMAIL: ${{ vars.QUOTATION_COMPANY_EMAIL }}
+          QUOTATION_AUTHORIZED_SIGNATORY: ${{ vars.QUOTATION_AUTHORIZED_SIGNATORY || 'Authorized Signatory' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'info' }}
+          RATE_LIMIT_WINDOW_MS: ${{ vars.RATE_LIMIT_WINDOW_MS || '900000' }}
+          RATE_LIMIT_MAX: ${{ vars.RATE_LIMIT_MAX || '200' }}
+          JSON_BODY_LIMIT: ${{ vars.JSON_BODY_LIMIT || '1mb' }}
+          SWAGGER_ENABLED: ${{ vars.SWAGGER_ENABLED || 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : "${EC2_HOST:?Set the EC2_HOST Actions variable}"
+          : "${EC2_SSH_KEY:?Set the EC2_SSH_KEY Actions secret}"
+          : "${EC2_KNOWN_HOSTS:?Set the EC2_KNOWN_HOSTS Actions secret}"
+          : "${MONGODB_URI:?Set the MONGODB_URI Actions secret}"
+          : "${JWT_ACCESS_SECRET:?Set the JWT_ACCESS_SECRET Actions secret}"
+          : "${FRONTEND_URL:?Set the FRONTEND_URL Actions variable to the deployed HTTPS frontend origin}"
+          : "${CORS_ORIGINS:?Set the CORS_ORIGINS Actions variable to the allowed HTTPS frontend origins}"
+          EC2_USER="${EC2_USER:-ubuntu}"
+          DEPLOY_PATH="/opt/sunvika-management-backend"
+
+          if [[ ${#JWT_ACCESS_SECRET} -lt 32 || "${JWT_ACCESS_SECRET,,}" == *replace-with* ]]; then
+            echo "JWT_ACCESS_SECRET must be a unique, non-placeholder value of at least 32 characters."
+            exit 1
+          fi
+
+          if [[ "$FRONTEND_URL" != https://* ]]; then
+            echo "FRONTEND_URL must use HTTPS."
+            exit 1
+          fi
+
+          docker build --pull -t sunvika-management-backend:latest .
+
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$EC2_SSH_KEY" > "$HOME/.ssh/ec2_deploy_key"
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/ec2_deploy_key" "$HOME/.ssh/known_hosts"
+
+          if [[ -n "$AWS_ACCESS_KEY_ID" && -z "$AWS_SECRET_ACCESS_KEY" ]] ||
+             [[ -z "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]]; then
+            echo "Configure both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or neither."
+            exit 1
+          fi
+
+          dotenv_quote() {
+            local value="${1//\\/\\\\}"
+            value="${value//\"/\\\"}"
+            value="${value//$'\n'/\\n}"
+            value="${value//$'\r'/\\r}"
+            printf '"%s"' "$value"
+          }
+
+          write_env() {
+            printf '%s=' "$1"
+            dotenv_quote "$2"
+            printf '\n'
+          }
+
+          {
+            write_env NODE_ENV production
+            write_env PORT 5000
+            write_env API_PREFIX /api/v1
+            write_env PUBLIC_API_URL https://sunvikamanagement.niakylie.com/api/v1
+            write_env MONGODB_URI "$MONGODB_URI"
+            write_env MONGODB_MAX_POOL_SIZE "$MONGODB_MAX_POOL_SIZE"
+            write_env JWT_ACCESS_SECRET "$JWT_ACCESS_SECRET"
+            write_env JWT_ACCESS_EXPIRES_IN "$JWT_ACCESS_EXPIRES_IN"
+            write_env REFRESH_TOKEN_EXPIRES_DAYS "$REFRESH_TOKEN_EXPIRES_DAYS"
+            write_env FRONTEND_URL "$FRONTEND_URL"
+            write_env CORS_ORIGINS "$CORS_ORIGINS"
+            write_env SMTP_HOST "$SMTP_HOST"
+            write_env SMTP_PORT "$SMTP_PORT"
+            write_env SMTP_SECURE "$SMTP_SECURE"
+            write_env SMTP_USER "$SMTP_USER"
+            write_env SMTP_PASSWORD "$SMTP_PASSWORD"
+            write_env SMTP_FROM "$SMTP_FROM"
+            write_env BCRYPT_SALT_ROUNDS "$BCRYPT_SALT_ROUNDS"
+            write_env AWS_REGION "$AWS_REGION"
+            write_env AWS_S3_BUCKET_NAME "$AWS_S3_BUCKET_NAME"
+            write_env AWS_S3_PROFILE_BUCKET "$AWS_S3_PROFILE_BUCKET"
+            write_env AWS_S3_CUSTOMER_DOCUMENT_BUCKET "$AWS_S3_CUSTOMER_DOCUMENT_BUCKET"
+            write_env AWS_S3_QUOTATION_BUCKET "$AWS_S3_QUOTATION_BUCKET"
+            write_env AWS_ACCESS_KEY_ID "$AWS_ACCESS_KEY_ID"
+            write_env AWS_SECRET_ACCESS_KEY "$AWS_SECRET_ACCESS_KEY"
+            write_env PROFILE_IMAGE_MAX_SIZE_BYTES "$PROFILE_IMAGE_MAX_SIZE_BYTES"
+            write_env CUSTOMER_DOCUMENT_MAX_SIZE_BYTES "$CUSTOMER_DOCUMENT_MAX_SIZE_BYTES"
+            write_env QUOTATION_COMPANY_ADDRESS "$QUOTATION_COMPANY_ADDRESS"
+            write_env QUOTATION_COMPANY_PHONE "$QUOTATION_COMPANY_PHONE"
+            write_env QUOTATION_COMPANY_EMAIL "$QUOTATION_COMPANY_EMAIL"
+            write_env QUOTATION_AUTHORIZED_SIGNATORY "$QUOTATION_AUTHORIZED_SIGNATORY"
+            write_env LOG_LEVEL "$LOG_LEVEL"
+            write_env RATE_LIMIT_WINDOW_MS "$RATE_LIMIT_WINDOW_MS"
+            write_env RATE_LIMIT_MAX "$RATE_LIMIT_MAX"
+            write_env JSON_BODY_LIMIT "$JSON_BODY_LIMIT"
+            write_env SWAGGER_ENABLED "$SWAGGER_ENABLED"
+          } | ssh -i "$HOME/.ssh/ec2_deploy_key" \
+            -o IdentitiesOnly=yes \
+            "$EC2_USER@$EC2_HOST" \
+            "umask 077 && cat > '$DEPLOY_PATH/.env.production'"
+
+          tar \
+            --exclude=.git \
+            --exclude=node_modules \
+            --exclude=dist \
+            --exclude=coverage \
+            --exclude=tests \
+            --exclude=.env \
+            --exclude='.env.*' \
+            -czf - . |
+            ssh -i "$HOME/.ssh/ec2_deploy_key" \
+              -o IdentitiesOnly=yes \
+              "$EC2_USER@$EC2_HOST" \
+              "mkdir -p '$DEPLOY_PATH' && tar -xzf - -C '$DEPLOY_PATH'"
+
+          docker save sunvika-management-backend:latest |
+            gzip -1 |
+            ssh -i "$HOME/.ssh/ec2_deploy_key" \
+              -o IdentitiesOnly=yes \
+              "$EC2_USER@$EC2_HOST" \
+              "gzip -d | sudo docker load"
+
+          ssh -i "$HOME/.ssh/ec2_deploy_key" \
+            -o IdentitiesOnly=yes \
+            "$EC2_USER@$EC2_HOST" \
+            "cd '$DEPLOY_PATH' && docker compose up -d --no-build --remove-orphans && sudo install -m 755 deploy/certbot/stop-nginx.sh /etc/letsencrypt/renewal-hooks/pre/stop-sunvika-nginx && sudo install -m 755 deploy/certbot/start-nginx.sh /etc/letsencrypt/renewal-hooks/post/start-sunvika-nginx"
