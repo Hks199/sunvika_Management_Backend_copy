@@ -60,3 +60,7 @@ CP candidate Excel uploads, RM assignments, private S3 preview/download and revi
 
 
 Confirmed customer-to-CP onboarding for MD, CP Head and RM is documented in [docs/CUSTOMER_CP_CONVERSION.md](docs/CUSTOMER_CP_CONVERSION.md). It preserves the original customer and history, creates a linked employee under a permitted RM, and uses the existing password-setup invitation flow.
+
+## Vercel website hosting
+
+See [Connect a Vercel frontend](docs/VERCEL_FRONTEND.md) for production origins, invitation URLs, direct uploads and mobile API configuration. Keep this backend and its workers on the existing persistent server.
