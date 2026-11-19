@@ -145,3 +145,11 @@ test('CP bulk import template, preview, history and confirmation reject anonymou
     const response=await fetch(`${baseUrl}/api/v1${path}`,{method});assert.equal(response.status,401,`${method} ${path}`);
   }
 });
+
+
+test('employee profile image options and editing routes require authentication',async()=>{
+  const id='0123456789abcdef01234567';
+  for(const [method,path]of [['GET',`/employees/${id}/profile-image-options`],['POST',`/employees/${id}/profile-image-upload`],['PUT',`/employees/${id}/profile-image-upload/${id}`],['PATCH',`/employees/${id}/profile-image`]]){
+    const response=await fetch(`${baseUrl}/api/v1${path}`,{method});assert.equal(response.status,401);
+  }
+});

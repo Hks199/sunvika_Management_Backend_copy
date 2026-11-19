@@ -1796,3 +1796,30 @@ test('CP bulk import requires explicit confirmation and valid upload metadata',a
   assert.equal(cpImportPreviewSchema.validate({fileName:'partners.xlsx'}).error,undefined);
   for(const fileName of ['../partners.xlsx','partners.xls','folder/partners.xlsx'])assert.ok(cpImportPreviewSchema.validate({managerId:'0123456789abcdef01234567',fileName}).error);
 });
+
+
+test('profile image editing enforces manage permission, consumes a verified upload and releases failed claims',async t=>{
+  const {default:mongoose,Types}=await import('mongoose');
+  const {employeeProfileImageService:service}=await import('../dist/modules/employees/services/employee-profile-image.service.js');
+  const {hierarchyService}=await import('../dist/modules/employees/services/hierarchy.service.js');
+  const {roleService}=await import('../dist/modules/roles/services/role.service.js');
+  const {profileImageService}=await import('../dist/modules/employees/services/profile-image.service.js');
+  const {HierarchyLockModel}=await import('../dist/modules/employees/models/hierarchy-lock.model.js');
+  const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');
+  const {ProfileImageUploadModel}=await import('../dist/modules/employees/models/profile-image-upload.model.js');
+  const actor=new Types.ObjectId(),target=new Types.ObjectId(),uploadId=new Types.ObjectId(),session={fixture:true};
+  let permitted=true,manage=true,fail=false,claims=0,releases=0,writes=0;
+  t.mock.method(hierarchyService,'canAccessEmployee',async(_actor,_target,mode)=>mode==='read'||manage);
+  t.mock.method(roleService,'hasPermission',async()=>permitted);
+  t.mock.method(HierarchyLockModel,'findOneAndUpdate',async()=>({}));t.mock.method(HierarchyLockModel,'deleteOne',async()=>({}));
+  t.mock.method(profileImageService,'claimUpload',async(owner,id)=>{claims++;assert.equal(String(owner),String(actor));assert.equal(id,String(uploadId));return {uploadId,key:'employee-profile-images/new.jpg'};});
+  t.mock.method(profileImageService,'releaseUpload',async id=>{releases++;assert.equal(String(id),String(uploadId));});
+  t.mock.method(mongoose.connection,'transaction',async work=>work(session));
+  t.mock.method(EmployeeModel,'updateOne',async(filter,update,options)=>{writes++;assert.equal(String(filter._id),String(target));assert.equal(update.$set.profileImage.key,'employee-profile-images/new.jpg');assert.equal(options.session,session);if(fail)throw new Error('Database unavailable');return {matchedCount:1};});
+  t.mock.method(ProfileImageUploadModel,'updateOne',async(filter,update,options)=>{assert.equal(String(filter.owner),String(actor));assert.equal(String(filter._id),String(uploadId));assert.equal(filter.employee,null);assert.equal(String(update.$set.employee),String(target));assert.equal(options.session,session);return {matchedCount:1};});
+  assert.equal((await service.options(actor,String(target))).canEdit,true);
+  manage=false;assert.equal((await service.options(actor,String(target))).canEdit,false);await assert.rejects(service.replace(actor,String(target),String(uploadId)),e=>e.statusCode===404);assert.equal(claims,0);
+  manage=true;permitted=false;await assert.rejects(service.replace(actor,String(target),String(uploadId)),e=>e.statusCode===403);assert.equal(claims,0);
+  permitted=true;await service.replace(actor,String(target),String(uploadId));assert.equal(claims,1);assert.equal(releases,0);
+  fail=true;await assert.rejects(service.replace(actor,String(target),String(uploadId)),/Database unavailable/);assert.equal(releases,1);assert.equal(writes,2);
+});

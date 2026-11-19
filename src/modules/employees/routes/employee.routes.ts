@@ -1,3 +1,6 @@
+import Joi from 'joi';
+import { employeeProfileImageService } from '../services/employee-profile-image.service.js';
+import { sendSuccess } from '../../../utils/api-response.util.js';
 import express, { Router } from 'express';
 import { env } from '../../../config/env.config.js';
 import { authenticate } from '../../../middleware/authenticate.middleware.js';
@@ -18,6 +21,11 @@ employeeRouter.put('/profile-image-upload/:uploadId', requirePermission('employe
   limit: env.profileImageMaxSizeBytes
 }), controller.uploadProfileImage);
 employeeRouter.post('/profile-image-upload-url', requirePermission('employees.create'), validateBody(createProfileImageUploadSchema), controller.createProfileImageUpload);
+employeeRouter.get('/:employeeId/profile-image-options', requirePermission('employees.read'), async(req,res,next)=>{try{return sendSuccess(res,'Profile image options',await employeeProfileImageService.options(req.auth!.employeeId,String(req.params.employeeId)));}catch(error){return next(error);}});
+const canEditProfile:express.RequestHandler=async(req,_res,next)=>{try{await employeeProfileImageService.assertEdit(req.auth!.employeeId,String(req.params.employeeId));next();}catch(error){return next(error);}};
+employeeRouter.post('/:employeeId/profile-image-upload',requirePermission('employees.update'),canEditProfile,validateBody(createProfileImageUploadSchema),controller.createProfileImageUploadReservation);
+employeeRouter.put('/:employeeId/profile-image-upload/:uploadId',requirePermission('employees.update'),canEditProfile,express.raw({type:['image/jpeg','image/png','image/webp'],limit:env.profileImageMaxSizeBytes}),controller.uploadProfileImage);
+employeeRouter.patch('/:employeeId/profile-image',requirePermission('employees.update'),validateBody(Joi.object({profileImageUploadId:Joi.string().hex().length(24).required()}).unknown(false)),async(req,res,next)=>{try{return sendSuccess(res,'Profile image updated',await employeeProfileImageService.replace(req.auth!.employeeId,String(req.params.employeeId),req.body.profileImageUploadId));}catch(error){return next(error);}});
 employeeRouter.get('/:employeeId/profile-image-url', requirePermission('employees.read'), controller.getProfileImageUrl);
 employeeRouter.get('/', requirePermission('employees.read'), validateQuery(paginationSchema), controller.list);
 employeeRouter.get('/downline', requirePermission('employees.read'), validateQuery(paginationSchema), controller.downline);
