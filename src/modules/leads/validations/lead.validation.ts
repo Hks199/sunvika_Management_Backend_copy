@@ -16,11 +16,12 @@ export const changeLeadStatusSchema = Joi.object({
   nextFollowUpDate: Joi.date().iso().greater('now').when('status', { is: 'NEED_FOLLOWUP', then: Joi.required(), otherwise: Joi.forbidden() }),
   quotation: Joi.object({
     requiredCapacityKW: Joi.number().positive().max(100000).required(),
-    ratePerKW: Joi.number().min(0).max(100000000).required(),
-    paymentMode: Joi.string().trim().min(2).max(100).required(),
-    panelBrand: Joi.string().trim().min(1).max(100).required(),
-    panelTechnology: Joi.string().trim().min(1).max(100).required(),
-    termsAndConditions: Joi.string().trim().min(10).max(5000).required()
+    ratePerKW: Joi.number().min(0).max(100000000).when('rate', { is: Joi.exist(), then: Joi.optional(), otherwise: Joi.required() }),
+    rate: Joi.number().min(0).max(100000000), panelCount: Joi.number().integer().min(1).max(1000000).when('rate', { is: Joi.exist(), then: Joi.required() }), wattsPerPanel: Joi.number().positive().max(100000).when('rate', { is: Joi.exist(), then: Joi.required() }),
+    inverter: Joi.string().trim().min(1).max(100).when('rate', { is: Joi.exist(), then: Joi.required() }),
+    systemType: Joi.string().trim().min(1).max(100).when('rate', { is: Joi.exist(), then: Joi.required() }), phase: Joi.string().valid('1-Phase', '3-Phase').when('rate', { is: Joi.exist(), then: Joi.required() }), category: Joi.string().trim().min(1).max(100).when('rate', { is: Joi.exist(), then: Joi.required() }), inverterBattery: Joi.string().trim().max(100).allow(''),
+    paymentMode: Joi.string().trim().min(2).max(100).required(), panelBrand: Joi.string().trim().min(1).max(100).required(), panelTechnology: Joi.string().trim().min(1).max(100).required(),
+    termsAndConditions: Joi.string().trim().max(5000).when('rate', { is: Joi.exist(), then: Joi.string().min(1), otherwise: Joi.string().min(10) }).required()
   }).when('status', { is: 'QUOTATION_SENT', then: Joi.optional(), otherwise: Joi.forbidden() })
 }).required();
 export const assignLeadSchema = Joi.object({ assignedTo: objectId.required() }).required();

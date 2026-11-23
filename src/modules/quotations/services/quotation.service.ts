@@ -7,10 +7,15 @@ import { AppError } from '../../../utils/app-error.util.js';
 import { createPaginationMeta, type PaginationInput } from '../../../utils/pagination.util.js';
 import { hierarchyService } from '../../employees/services/hierarchy.service.js';
 import { EmployeeModel } from '../../employees/models/employee.model.js';
+import { StateModel } from '../../geography/models/state.model.js';
 import { LeadModel } from '../../leads/models/lead.model.js';
 import { CustomerModel } from '../../customers/models/customer.model.js';
 import { roleService } from '../../roles/services/role.service.js';
 import { RoleModel } from '../../roles/models/role.model.js';
+import { getQuotationPolicy, selectSubsidy } from '../quotation-policy.js';
+import { calculateQuotation } from '../quotation-calculation.js';
+import { nextQuotationNumber } from '../quotation-number.js';
+import { quotationOptions } from '../quotation-options.js';
 import { QuotationModel } from '../models/quotation.model.js';
 import { QuotationSequenceModel } from '../models/quotation-sequence.model.js';
 import { BrochureModel } from '../models/brochure.model.js';
@@ -65,7 +70,7 @@ function whatsappUrl(phone: string, message: string): string {
 }
 
 interface QuotationInput {
-  leadId: string; requiredCapacityKW: number; ratePerKW: number; paymentMode: string; panelBrand: string; panelTechnology: string; termsAndConditions: string;
+  leadId: string; requiredCapacityKW: number; ratePerKW?: number; rate?: number; panelCount?: number; wattsPerPanel?: number; inverter?: string; systemType?: string; phase?: string; category?: string; inverterBattery?: string; paymentMode: string; panelBrand: string; panelTechnology: string; termsAndConditions: string;
 }
 
 export const quotationService = {
@@ -73,19 +78,31 @@ export const quotationService = {
     const lead = await LeadModel.findById(parseId(input.leadId, 'lead ID'));
     if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'quotation') && !await canAccessConvertedLead(actorId, lead._id))) throw new AppError('Lead not found', 404);
     if (lead.status !== 'QUOTATION_SENT') throw new AppError('A quotation can only be generated for a lead with QUOTATION_SENT status', 409);
-    const capacity = Number(input.requiredCapacityKW.toFixed(3));
-    const rate = Number(input.ratePerKW.toFixed(2));
-    const total = Math.round(capacity * rate * 100) / 100;
+    const { modern, capacity, rate, total } = calculateQuotation(input);
+    if (modern) {
+      const options = await quotationOptions();
+      if (!options.systemTypes.includes(input.systemType ?? '') || !options.categories.includes(input.category ?? '') || !options.paymentModes.includes(input.paymentMode) || !options.panelBrands.includes(input.panelBrand) || !options.panelTechnologies.includes(input.panelTechnology) || !options.inverters.includes(input.inverter ?? '') || !options.wattsOptions.some(value => Number(value) === input.wattsPerPanel)) throw new AppError('Select current quotation options configured by MD', 400);
+    }
+    if (!Number.isFinite(capacity) || capacity <= 0 || capacity > 100000) throw new AppError('Required capacity is outside the supported range', 400);
     if (!Number.isFinite(total)) throw new AppError('Quotation total is outside the supported range', 400);
     const customer = await CustomerModel.findOne({ sourceLead: lead._id }).select('_id');
     const latest = await QuotationModel.findOne({ lead: lead._id }).sort({ version: -1 }).select('version').lean();
     const version = (latest?.version ?? 0) + 1;
-    const quotationNumber = await nextNumber('QTN');
     const quotationDate = new Date();
+    const quotationNumber = await nextQuotationNumber(lead.customerName, quotationDate);
+    const policy = modern ? await getQuotationPolicy() : undefined;
+    const subsidy = policy ? selectSubsidy(policy.rules, String(lead.state), capacity) : undefined;
+    if (subsidy && subsidy.central + subsidy.state > total) throw new AppError('Configured subsidy exceeds quotation amount; ask MD to review quotation settings', 400);
+    const validUntil = policy ? new Date(quotationDate.getTime() + policy.validityDays * 86400000) : undefined;
+    const advisor = modern ? await EmployeeModel.findById(lead.assignedTo ?? lead.creatorId).select('firstName middleName lastName mobileNumber').lean() : null;
+    const quoteState = modern ? await StateModel.findById(lead.state).select('name').lean() : null;
+    const salesAdvisorName = advisor ? [advisor.firstName, advisor.middleName, advisor.lastName].filter(Boolean).join(' ') : '';
+    const salesAdvisorPhone = advisor?.mobileNumber ?? '';
     const companyDetails = [env.quotationCompanyAddress, env.quotationCompanyPhone, env.quotationCompanyEmail].filter(Boolean).join(' | ');
     const pdf = await generateQuotationPdf({
       companyName: 'Sunvika Private Limited', companyDetails, customerName: lead.customerName, customerMobile: lead.mobileNumber,
       siteAddress: lead.siteAddress, requiredCapacityKW: capacity, ratePerKW: rate, totalProjectAmount: total,
+      ...(modern ? { panelCount: input.panelCount, wattsPerPanel: input.wattsPerPanel, inverter: input.inverter, isFixedRate: true, systemType: input.systemType, phase: input.phase, category: input.category, inverterBattery: input.inverterBattery, centralSubsidy: subsidy?.central, stateSubsidy: subsidy?.state, netCost: Math.round((total - (subsidy?.central ?? 0) - (subsidy?.state ?? 0)) * 100) / 100, validUntil, salesAdvisorName, salesAdvisorPhone, policy, quoteStateId: String(lead.state), quoteStateName: quoteState?.name ?? '' } : {}),
       paymentMode: input.paymentMode, panelBrand: input.panelBrand, panelTechnology: input.panelTechnology,
       quotationDate, quotationNumber, version, termsAndConditions: input.termsAndConditions, authorizedSignatory: env.quotationAuthorizedSignatory
     });
@@ -95,10 +112,11 @@ export const quotationService = {
       const quote = await QuotationModel.create({
         quotationNumber, lead: lead._id, ...(customer ? { customer: customer._id } : {}), version,
         customerName: lead.customerName, customerMobile: lead.mobileNumber, siteAddress: lead.siteAddress,
-        requiredCapacityKW: Types.Decimal128.fromString(capacity.toFixed(3)),
-        ratePerKW: Types.Decimal128.fromString(rate.toFixed(2)),
+        requiredCapacityKW: Types.Decimal128.fromString(modern ? String(capacity) : capacity.toFixed(3)),
+        ...(modern ? { rate: Types.Decimal128.fromString(rate.toFixed(2)), panelCount: input.panelCount, wattsPerPanel: input.wattsPerPanel, inverter: input.inverter } : { ratePerKW: Types.Decimal128.fromString(rate.toFixed(2)) }),
         totalProjectAmount: Types.Decimal128.fromString(total.toFixed(2)),
         paymentMode: input.paymentMode, panelBrand: input.panelBrand, panelTechnology: input.panelTechnology,
+        ...(modern ? { systemType: input.systemType, phase: input.phase, category: input.category, inverterBattery: input.inverterBattery, centralSubsidy: subsidy?.central, stateSubsidy: subsidy?.state, netCost: Math.round((total - (subsidy?.central ?? 0) - (subsidy?.state ?? 0)) * 100) / 100, validUntil, salesAdvisorName, salesAdvisorPhone, policySnapshot: policy ? { ...policy, rules: subsidy ? [subsidy] : [] } : undefined } : {}),
         quotationDate, termsAndConditions: input.termsAndConditions, authorizedCompanyDetails: [companyDetails, env.quotationAuthorizedSignatory].filter(Boolean).join(' | '),
         s3Key: key, fileSize: pdf.byteLength, generatedBy: actorId, status: 'GENERATED'
       });

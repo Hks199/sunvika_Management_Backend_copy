@@ -102,7 +102,8 @@ export const leadService = {
     nextFollowUpDate?: Date;
     quotation?: {
       requiredCapacityKW: number;
-      ratePerKW: number;
+      ratePerKW?: number;
+      rate?: number; panelCount?: number; wattsPerPanel?: number; inverter?: string; systemType?: string; phase?: string; category?: string; inverterBattery?: string;
       paymentMode: string;
       panelBrand: string;
       panelTechnology: string;

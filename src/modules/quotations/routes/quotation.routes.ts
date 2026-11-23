@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import { quotationPolicyRouter } from '../quotation-policy.js';
+import { quotationOptionsRouter } from '../quotation-options.js';
 import { authenticate } from '../../../middleware/authenticate.middleware.js';
 import { requirePermission } from '../../../middleware/authorize.middleware.js';
 import { validateBody, validateQuery } from '../../../middleware/validate.middleware.js';
@@ -7,6 +9,8 @@ import { createQuotationSchema, quotationListQuerySchema, shareBrochureSchema, s
 
 export const quotationRouter = Router();
 quotationRouter.use(authenticate);
+quotationRouter.use('/options', quotationOptionsRouter);
+quotationRouter.use('/policy', quotationPolicyRouter);
 quotationRouter.post('/brochures', requirePermission('quotations.create'), controller.generateBrochure);
 quotationRouter.get('/brochures/:brochureId/download-url', requirePermission('quotations.read'), controller.brochureDownloadUrl);
 quotationRouter.post('/brochures/:brochureId/share', requirePermission('quotations.share'), validateBody(shareBrochureSchema), controller.shareBrochure);

@@ -1,8 +1,11 @@
+import { sampleQuotationPdf } from './sample-quotation-pdf.js';
+import type { QuotationPolicy } from '../quotation-policy.js';
 import PDFDocument from 'pdfkit';
 
 export interface QuotationPdfData {
   companyName: string; companyDetails: string; customerName: string; customerMobile: string; siteAddress: string;
   requiredCapacityKW: number; ratePerKW: number; totalProjectAmount: number; paymentMode: string;
+  panelCount?: number | undefined; wattsPerPanel?: number | undefined; inverter?: string | undefined; isFixedRate?: boolean; systemType?: string | undefined; phase?: string | undefined; category?: string | undefined; inverterBattery?: string | undefined; centralSubsidy?: number | undefined; stateSubsidy?: number | undefined; netCost?: number | undefined; validUntil?: Date | undefined; salesAdvisorName?: string | undefined; salesAdvisorPhone?: string | undefined; policy?: QuotationPolicy | undefined; quoteStateId?: string | undefined; quoteStateName?: string | undefined;
   panelBrand: string; panelTechnology: string; quotationDate: Date; quotationNumber: string; version: number; termsAndConditions: string; authorizedSignatory: string;
 }
 
@@ -29,6 +32,7 @@ function row(doc: PDFKit.PDFDocument, label: string, value: string): void {
 }
 
 export async function generateQuotationPdf(data: QuotationPdfData): Promise<Buffer> {
+  if (data.isFixedRate && data.policy) return sampleQuotationPdf(data);
   const doc = new PDFDocument({ size: 'A4', margins: { top: 48, right: 52, bottom: 52, left: 52 }, info: { Title: `Quotation ${data.quotationNumber}`, Author: data.companyName, Subject: 'Solar project quotation' } });
   doc.rect(0, 0, 595, 118).fill('#14532d');
   doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(22).text(data.companyName, 52, 43);
@@ -42,8 +46,9 @@ export async function generateQuotationPdf(data: QuotationPdfData): Promise<Buff
   row(doc, 'Installation site', data.siteAddress);
 
   heading(doc, 'Solar project');
-  row(doc, 'Required capacity', `${data.requiredCapacityKW.toLocaleString('en-IN')} kW`);
-  row(doc, 'Rate per kW', money(data.ratePerKW));
+  row(doc, 'Required capacity', `${data.requiredCapacityKW.toLocaleString('en-IN', { maximumFractionDigits: 10 })} kW`);
+  row(doc, data.isFixedRate ? 'Rate' : 'Rate per kW', money(data.ratePerKW));
+  if (data.isFixedRate) { row(doc, 'Number of panels', String(data.panelCount)); row(doc, 'Watts per panel', String(data.wattsPerPanel)); row(doc, 'Inverter', data.inverter || ''); }
   row(doc, 'Payment mode', data.paymentMode);
   row(doc, 'Panel brand', data.panelBrand);
   row(doc, 'Panel technology', data.panelTechnology);
@@ -55,7 +60,7 @@ export async function generateQuotationPdf(data: QuotationPdfData): Promise<Buff
   doc.fillColor('#14532d').font('Helvetica-Bold').fontSize(17).text(money(data.totalProjectAmount), 330, totalY + 16, { width: 195, align: 'right' });
   doc.y = totalY + 58;
 
-  heading(doc, 'Terms and conditions');
+  heading(doc, data.isFixedRate ? 'Remark' : 'Terms and conditions');
   doc.font('Helvetica').fontSize(9).fillColor('#17221b').text(data.termsAndConditions, { width: 490, lineGap: 3 });
   doc.moveDown(2);
   doc.font('Helvetica-Bold').fontSize(10).text(data.companyName);

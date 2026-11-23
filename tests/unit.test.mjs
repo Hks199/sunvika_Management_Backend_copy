@@ -1823,3 +1823,45 @@ test('profile image editing enforces manage permission, consumes a verified uplo
   permitted=true;await service.replace(actor,String(target),String(uploadId));assert.equal(claims,1);assert.equal(releases,0);
   fail=true;await assert.rejects(service.replace(actor,String(target),String(uploadId)),/Database unavailable/);assert.equal(releases,1);assert.equal(writes,2);
 });
+
+test('new quotation rate is the project total and legacy calculations remain unchanged', async () => {
+  const { calculateQuotation } = await import('../dist/modules/quotations/quotation-calculation.js');
+  assert.deepEqual(calculateQuotation({ rate: 150000, requiredCapacityKW: 7.1234, panelCount: 10, wattsPerPanel: 550 }), { modern: true, capacity: 7.1234, rate: 150000, total: 150000 });
+  assert.deepEqual(calculateQuotation({ requiredCapacityKW: 5, ratePerKW: 42000 }), { modern: false, capacity: 5, rate: 42000, total: 210000 });
+  const quotation = { rate: 150000, requiredCapacityKW: 7, panelCount: 10, wattsPerPanel: 550, systemType: 'On-Grid', phase: '1-Phase', category: 'Residential', paymentMode: 'Cash', panelBrand: 'Sunvika', panelTechnology: 'Mono', inverter: 'Hybrid', termsAndConditions: 'Remark' };
+  assert.equal(changeLeadStatusSchema.validate({ status: 'QUOTATION_SENT', remark: 'Ready', quotation }).error, undefined);
+  assert.ok(changeLeadStatusSchema.validate({ status: 'QUOTATION_SENT', remark: 'Ready', quotation: { ...quotation, requiredCapacityKW: undefined } }).error);
+  assert.ok(changeLeadStatusSchema.validate({ status: 'QUOTATION_SENT', remark: 'Ready', quotation: { ...quotation, panelCount: 0 } }).error);
+  assert.ok(changeLeadStatusSchema.validate({ status: 'QUOTATION_SENT', remark: 'Ready', quotation: { ...quotation, inverter: '' } }).error);
+});
+
+test('wattage options accept positive numeric values and reject invalid options', async () => {
+  const { wattsOptionsSchema } = await import('../dist/modules/quotations/quotation-options.js');
+  assert.equal(wattsOptionsSchema.validate(['550', '575.5']).error, undefined);
+  for (const value of ['0', '-1', 'abc', '100001']) assert.ok(wattsOptionsSchema.validate([value]).error);
+});
+
+
+test('quotation subsidy policy matches state and capacity without guessing', async () => {
+  const { selectSubsidy, quotationPolicySchema } = await import('../dist/modules/quotations/quotation-policy.js');
+  const rule = { stateId: '0123456789abcdef01234567', minKW: 2, maxKW: 3, central: 78000, state: 30000 };
+  assert.deepEqual(selectSubsidy([rule], rule.stateId, 3), rule);
+  assert.throws(() => selectSubsidy([rule], rule.stateId, 5), /No subsidy setting/);
+  const policy = { rules: [rule], validityDays: 15, subsidyDeadline: '', contactPhone: '', contactEmail: '', website: '', officeAddress: '', branches: '' };
+  assert.equal(quotationPolicySchema.validate(policy).error, undefined);
+  assert.ok(quotationPolicySchema.validate({ ...policy, rules: [rule, rule] }).error);
+});
+
+
+test('quotation numbers use India date and customer name and remain unique on repeat', async (t) => {
+  const { quotationNumberBase, nextQuotationNumber } = await import('../dist/modules/quotations/quotation-number.js');
+  const { QuotationSequenceModel } = await import('../dist/modules/quotations/models/quotation-sequence.model.js');
+  const time = new Date('2026-11-22T20:00:00.000Z');
+  const base = 'QTN-2026-11-23-MUKESH-KUMAR-SAH';
+  assert.equal(quotationNumberBase('Mukesh Kumar Sah', time), base);
+  assert.equal(quotationNumberBase('  Jos' + String.fromCharCode(233) + ' / Singh  ', time), 'QTN-2026-11-23-JOSE-SINGH');
+  let value = 0;
+  t.mock.method(QuotationSequenceModel, 'findOneAndUpdate', async () => ({ value: ++value }));
+  assert.equal(await nextQuotationNumber('Mukesh Kumar Sah', time), base);
+  assert.equal(await nextQuotationNumber('Mukesh Kumar Sah', time), base + '-2');
+});

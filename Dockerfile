@@ -22,6 +22,7 @@ RUN apk add --no-cache dumb-init
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node package.json ./package.json
+COPY --chown=node:node assets/quotation-logo.png ./assets/quotation-logo.png
 USER node
 EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 5000) + (process.env.API_PREFIX || '/api/v1') + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
