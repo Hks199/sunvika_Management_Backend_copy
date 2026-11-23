@@ -67,7 +67,7 @@ jobs:
           SMTP_PORT: ${{ vars.SMTP_PORT || '587' }}
           SMTP_SECURE: ${{ vars.SMTP_SECURE || 'false' }}
           SMTP_USER: ${{ secrets.SMTP_USER || vars.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD || "oeooqkkfmnfflaaz" }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM || vars.SMTP_FROM }}
           BCRYPT_SALT_ROUNDS: ${{ vars.BCRYPT_SALT_ROUNDS || '12' }}
           AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
