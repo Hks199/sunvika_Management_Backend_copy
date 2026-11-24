@@ -35,7 +35,7 @@ export async function seedSystemRoles(createdBy?: Types.ObjectId): Promise<void>
     { name: 'Managing Director', code: 'MD', level: 0, category: 'PRIMARY', parentCode: null, childCodes: ['MIS', 'CP_HEAD'], permissions: [...permissionIds.keys()] },
     { name: 'Management Information System', code: 'MIS', level: 1, category: 'PRIMARY', parentCode: 'MD', childCodes: [], permissions: ['employees.create','employees.read','employees.update','employees.deactivate','employees.activate','employees.invite','employees.hierarchy','leads.create','leads.read','leads.update','leads.assign','leads.status','customers.create','customers.read','customers.update','visits.create','visits.read','quotations.create','quotations.read','quotations.share','amc.create','amc.read','amc.update','reports.read','dashboard.read'] },
     { name: 'Channel Partner Head', code: 'CP_HEAD', level: 1, category: 'PRIMARY', parentCode: 'MD', childCodes: ['RM'], permissions: ['employees.create','employees.read','employees.update','employees.deactivate','employees.activate','employees.invite','employees.hierarchy','leads.create','leads.read','leads.update','leads.assign','leads.status','customers.create','customers.read','customers.update','visits.create','visits.read','quotations.create','quotations.read','quotations.share','amc.create','amc.read','amc.update','reports.read','dashboard.read'] },
-    { name: 'Relationship Manager', code: 'RM', level: 2, category: 'PRIMARY', parentCode: 'CP_HEAD', childCodes: ['CP'], permissions: ['employees.create','employees.read','employees.update','employees.invite','employees.hierarchy','leads.create','leads.read','leads.update','leads.status','customers.create','customers.read','customers.update','visits.create','visits.read','quotations.create','quotations.read','quotations.share','amc.create','amc.read','amc.update','reports.read','dashboard.read'] },
+    { name: 'Relationship Manager', code: 'RM', level: 2, category: 'PRIMARY', parentCode: 'CP_HEAD', childCodes: ['CP'], permissions: ['employees.create','employees.read','employees.update','employees.invite','employees.hierarchy','leads.create','leads.read','leads.update','leads.assign','leads.status','customers.create','customers.read','customers.update','visits.create','visits.read','quotations.create','quotations.read','quotations.share','amc.create','amc.read','amc.update','reports.read','dashboard.read'] },
     { name: 'Channel Partner', code: 'CP', level: 3, category: 'PRIMARY', parentCode: 'RM', childCodes: [], permissions: ['leads.create','leads.read','leads.update','leads.status','customers.create','customers.read','visits.create','visits.read','amc.create','amc.read','dashboard.read'] },
   ] as const;
 
@@ -80,6 +80,13 @@ export async function seedSystemRoles(createdBy?: Types.ObjectId): Promise<void>
     });
   }
   invalidateRolePermissionCache();
+}
+
+export async function grantRmLeadAssignment(): Promise<void> {
+  const permission = await PermissionModel.findOne({ code: 'leads.assign' }).select('_id').lean();
+  if (!permission) return;
+  const updated = await RoleModel.updateOne({ code: 'RM', permissions: { $ne: permission._id } }, { $addToSet: { permissions: permission._id }, $inc: { permissionVersion: 1 } });
+  if (updated.modifiedCount) invalidateRolePermissionCache();
 }
 
 export const roleService = {

@@ -1,3 +1,4 @@
+import { canAccessAssignedLead } from './lead-assignment-access.js';
 import { hasOrganizationVisibility, type AccessMode } from '../../employees/services/visibility-policy.js';
 import { linkedCustomerLeadIds, canAccessConvertedLead } from '../../customers/services/customer-linked-access.service.js';
 import { randomBytes } from 'node:crypto';
@@ -23,7 +24,7 @@ function escaped(value: string): string { return value.replace(/[.*+?^${}()|[\]\
 
 async function canManage(actorId: Types.ObjectId, leadId: Types.ObjectId) {
   const lead = await LeadModel.findById(leadId);
-  if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'lead') && !await canAccessConvertedLead(actorId, lead._id))) throw new AppError('Lead not found', 404);
+  if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'lead') && !await canAccessConvertedLead(actorId, lead._id) && !await canAccessAssignedLead(actorId, lead.assignedTo))) throw new AppError('Lead not found', 404);
   return lead;
 }
 
@@ -33,6 +34,17 @@ async function accessibleCreatorIds(actorId: Types.ObjectId, accessMode: AccessM
   if (!role) throw new AppError('Employee role is unavailable', 403);
   if (role.code === 'MD' || (accessMode === 'read' && hasOrganizationVisibility(role.code)) || role.category === 'ADMIN_HEAD') return null;
   return hierarchyService.getDownlineEmployeeIds(actorId);
+}
+
+async function directAssigneeRole(actorId: Types.ObjectId): Promise<Types.ObjectId | null> {
+  const actor = await EmployeeModel.findById(actorId).select('role isActive').lean();
+  if (!actor?.isActive) return null;
+  const actorRole = await RoleModel.findById(actor.role).select('code isActive').lean();
+  const nextRole: Record<string, string> = { MD: 'CP_HEAD', CP_HEAD: 'RM', RM: 'CP' };
+  const code = actorRole?.isActive ? nextRole[actorRole.code] : undefined;
+  if (!code) return null;
+  const role = await RoleModel.findOne({ code, isActive: true }).select('_id').lean();
+  return role?._id ?? null;
 }
 
 export const leadService = {
@@ -51,7 +63,7 @@ export const leadService = {
     const creators = await accessibleCreatorIds(actorId);
     const employeeScope = await resolveEmployeeScope(actorId, filter.employeeName, creators);
     const query: Record<string, unknown> = {};
-    if (employeeScope) query.$and = [{ $or: [{ creatorId: { $in: employeeScope } }, { _id: { $in: await linkedCustomerLeadIds(employeeScope) } }] }];
+    if (employeeScope) query.$and = [{ $or: [{ creatorId: { $in: employeeScope } }, { assignedTo: { $in: employeeScope } }, { _id: { $in: await linkedCustomerLeadIds(employeeScope) } }] }];
     const branchId = await resolveBranchId(filter.branchId);
     if (branchId) query.branch = branchId;
     const filterDates = dateRange('createdAt', filter);
@@ -70,8 +82,8 @@ export const leadService = {
   },
   async get(actorId: Types.ObjectId, leadId: string) {
     const id = objectId(leadId);
-    const accessRecord = await LeadModel.findById(id).select('creatorId').lean();
-    if (!accessRecord || (!await hierarchyService.canAccessResource(actorId, accessRecord.creatorId, 'lead', 'read') && !await canAccessConvertedLead(actorId, accessRecord._id))) {
+    const accessRecord = await LeadModel.findById(id).select('creatorId assignedTo').lean();
+    if (!accessRecord || (!await hierarchyService.canAccessResource(actorId, accessRecord.creatorId, 'lead', 'read') && !await canAccessConvertedLead(actorId, accessRecord._id) && !await canAccessAssignedLead(actorId, accessRecord.assignedTo, 'read')))  {
       throw new AppError('Lead not found', 404);
     }
     const lead = await LeadModel.findById(id)
@@ -157,24 +169,30 @@ export const leadService = {
     }
     return quotation ? { lead, quotation } : lead;
   },
+  async assignmentOptions(actorId: Types.ObjectId, leadId: string) {
+    await canManage(actorId, objectId(leadId));
+    const role = await directAssigneeRole(actorId);
+    if (!role) return [];
+    return EmployeeModel.find({ reportingTo: actorId, role, isActive: true }).select('employeeCode firstName middleName lastName role').populate('role', 'name code').sort({ firstName: 1, lastName: 1, employeeCode: 1 }).lean();
+  },
   async assign(actorId: Types.ObjectId, leadId: string, assignedTo: string) {
     const lead = await canManage(actorId, objectId(leadId));
     const targetId = objectId(assignedTo, 'employee ID');
-    const target = await EmployeeModel.findOne({ _id: targetId, isActive: true }).select('_id hierarchyPath').lean();
-    const allowedIds = await accessibleCreatorIds(actorId, 'manage');
-    if (!target || (allowedIds && !allowedIds.some((id) => id.equals(targetId)))) throw new AppError('Assignee must be an active employee within your hierarchy', 400);
+    const role = await directAssigneeRole(actorId);
+    const target = role ? await EmployeeModel.findOne({ _id: targetId, reportingTo: actorId, role, isActive: true }).select('_id').lean() : null;
+    if (!target) throw new AppError('Assignee must be an active direct report with the next role in the sales hierarchy', 400);
     lead.assignedTo = targetId; await lead.save(); return lead;
   },
   async history(actorId: Types.ObjectId, leadId: string) {
-    const lead = await LeadModel.findById(objectId(leadId)).select('creatorId').lean();
-    if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'lead', 'read') && !await canAccessConvertedLead(actorId, lead._id))) throw new AppError('Lead not found', 404);
+    const lead = await LeadModel.findById(objectId(leadId)).select('creatorId assignedTo').lean();
+    if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'lead', 'read') && !await canAccessConvertedLead(actorId, lead._id) && !await canAccessAssignedLead(actorId, lead.assignedTo, 'read'))) throw new AppError('Lead not found', 404);
     return LeadStatusHistoryModel.find({ lead: lead._id }).populate('changedBy', 'employeeCode firstName lastName').sort({ changedAt: -1 }).lean();
   },
   async followUps(actorId: Types.ObjectId, pagination: PaginationInput, overdue = false, filter: RecordListFilters = {}) {
     const creators = await accessibleCreatorIds(actorId);
     const employeeScope = await resolveEmployeeScope(actorId, filter.employeeName, creators);
     const query: Record<string, unknown> = { status: 'NEED_FOLLOWUP', nextFollowUpDate: overdue ? { $lt: new Date() } : { $gte: new Date() } };
-    if (employeeScope) query.$and = [{ $or: [{ creatorId: { $in: employeeScope } }, { _id: { $in: await linkedCustomerLeadIds(employeeScope) } }] }];
+    if (employeeScope) query.$and = [{ $or: [{ creatorId: { $in: employeeScope } }, { assignedTo: { $in: employeeScope } }, { _id: { $in: await linkedCustomerLeadIds(employeeScope) } }] }];
     const branchId = await resolveBranchId(filter.branchId);
     if (branchId) query.branch = branchId;
     const filterDate = dateRange('nextFollowUpDate', filter).nextFollowUpDate;

@@ -8,8 +8,9 @@ const projectFields = {
 };
 export const convertLeadSchema = Joi.object({
   ...projectFields,
+  rate: Joi.number().min(0).max(100000000), panelCount: Joi.number().integer().min(1), wattsPerPanel: Joi.number().positive(), inverter: Joi.string().trim().max(100), systemType: Joi.string().trim().max(100), phase: Joi.string().trim().max(100), category: Joi.string().trim().max(100), inverterBattery: Joi.string().trim().max(100).allow(''), quotationRemark: Joi.string().trim().max(5000).allow(''), quotationId: objectId,
   remark: Joi.string().trim().min(1).max(1000).required(),
-  documentUploadIds: Joi.array().items(objectId.required()).length(4).unique().required()
+  documentUploadIds: Joi.array().items(objectId.required()).length(5).unique().required()
 }).required();
 export const updateCustomerSchema = Joi.object({
   customerName: Joi.string().trim().min(2).max(160), mobileNumber: Joi.string().trim().pattern(/^\+?[0-9]{10,15}$/), alternateNumber: Joi.string().trim().pattern(/^\+?[0-9]{10,15}$/).allow(''),
@@ -17,7 +18,7 @@ export const updateCustomerSchema = Joi.object({
   status: Joi.string().valid('ONBOARDING', 'ACTIVE', 'COMPLETED', 'CANCELLED')
 }).min(1).required();
 export const customerListQuerySchema = Joi.object({
-  customerType: Joi.string().valid('customer_only'),
+  customerType: Joi.string().valid('customer_only'), creatorId: objectId,
   page: Joi.number().integer().min(1).default(1), limit: Joi.number().integer().min(1).max(100).default(20), search: Joi.string().trim().max(100),
   branchId: objectId, dateFrom: Joi.date().iso(), dateTo: Joi.date().iso(), employeeName: Joi.string().trim().min(1).max(100)
 }).unknown(false).custom((value, helpers) => value.dateFrom && value.dateTo && value.dateFrom > value.dateTo
@@ -33,7 +34,11 @@ export const createLeadConversionUploadsSchema = Joi.object({
     fileName: Joi.string().trim().min(1).max(180).required(),
     mimeType: Joi.string().valid('application/pdf', 'image/jpeg', 'image/png', 'image/webp').required(),
     fileSize: Joi.number().integer().min(1).max(20971520).required()
-  }).required()).length(4).unique((a, b) => a.documentType === b.documentType).required()
+  }).required()).length(5).unique((a, b) => a.documentType === b.documentType).required()
 }).required();
 export const completeDocumentUploadSchema = Joi.object({ uploadId: objectId.required() }).required();
-export const verifyDocumentSchema = Joi.object({ status: Joi.string().valid('VERIFIED', 'REJECTED').required(), remark: Joi.string().trim().max(1000).allow('') }).required();
+export const verifyDocumentSchema = Joi.object({ status: Joi.string().valid('VERIFIED', 'REJECTED').required(), remark: Joi.when('status', { is: 'REJECTED', then: Joi.string().trim().min(1).max(1000).required(), otherwise: Joi.string().trim().max(1000).allow('') }) }).required();
+
+export const createCpCustomerUploadsSchema = createLeadConversionUploadsSchema.keys({ documents: Joi.array().items(Joi.object({ documentType: Joi.string().valid('PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK').required(), fileName: Joi.string().trim().min(1).max(180).required(), mimeType: Joi.string().valid('application/pdf', 'image/jpeg', 'image/png', 'image/webp').required(), fileSize: Joi.number().integer().min(1).max(20971520).required() }).required()).length(4).unique((a, b) => a.documentType === b.documentType).required() });
+
+export const misVerifyDocumentSchema = Joi.object({ status: Joi.string().valid('VERIFIED', 'PENDING').required(), remark: Joi.when('status', { is: 'PENDING', then: Joi.string().trim().min(1).max(1000).required(), otherwise: Joi.string().trim().max(1000).allow('') }) }).required();

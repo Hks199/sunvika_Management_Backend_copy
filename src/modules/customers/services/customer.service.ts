@@ -1,3 +1,5 @@
+import { reviewActor, currentDocuments, reviewComplete, misReviewComplete } from './customer-review.service.js';
+import { canAccessAssignedLead } from '../../leads/services/lead-assignment-access.js';
 import { QuotationModel } from '../../quotations/models/quotation.model.js';
 import { AMCContractModel } from '../../amc/models/amc-contract.model.js';
 import { randomBytes } from 'node:crypto';
@@ -32,28 +34,44 @@ interface ConversionInput {
   panelBrand: string;
   panelTechnology: string;
   remark: string;
+  rate?: number; panelCount?: number; wattsPerPanel?: number; inverter?: string; systemType?: string; phase?: string; category?: string; inverterBattery?: string; quotationRemark?: string; quotationId?: string;
   documentUploadIds: string[];
 }
 
 export const customerService = {
+  async conversionOptions(actorId: Types.ObjectId, leadIdValue: string) {
+    const lead = await LeadModel.findById(objectId(leadIdValue, 'lead ID'));
+    if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'lead') && !await canAccessAssignedLead(actorId, lead.assignedTo))) throw new AppError('Lead not found', 404);
+    const quote = await QuotationModel.findOne({ lead: lead._id }).sort({ version: -1 }).select('requiredCapacityKW rate ratePerKW totalProjectAmount panelCount wattsPerPanel inverter systemType phase category inverterBattery paymentMode panelBrand panelTechnology termsAndConditions quotationNumber').lean();
+    if (!quote) return { quotation: null };
+    const decimal = (value: { toString(): string } | null | undefined) => value == null ? undefined : Number(value.toString());
+    return { quotation: { quotationId: String(quote._id), quotationNumber: quote.quotationNumber, requiredCapacityKW: decimal(quote.requiredCapacityKW), rate: decimal(quote.rate ?? quote.totalProjectAmount), ratePerKW: decimal(quote.ratePerKW), panelCount: quote.panelCount, wattsPerPanel: quote.wattsPerPanel, inverter: quote.inverter, systemType: quote.systemType, phase: quote.phase, category: quote.category, inverterBattery: quote.inverterBattery, paymentMode: quote.paymentMode, panelBrand: quote.panelBrand, panelTechnology: quote.panelTechnology, quotationRemark: quote.termsAndConditions } };
+  },
   async convert(actorId: Types.ObjectId, leadIdValue: string, input: ConversionInput) {
     const leadId = objectId(leadIdValue, 'lead ID');
     const lead = await LeadModel.findById(leadId);
-    if (!lead || !await hierarchyService.canAccessResource(actorId, lead.creatorId, 'lead')) throw new AppError('Lead not found', 404);
+    if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'lead') && !await canAccessAssignedLead(actorId, lead.assignedTo))) throw new AppError('Lead not found', 404);
     const existing = await CustomerModel.findOne({ sourceLead: lead._id });
     if (existing) {
       throw new AppError('This lead has already been converted to a customer', 409);
     }
     if (lead.status === 'CONVERTED') throw new AppError('Lead is marked converted but its customer record is unavailable', 409);
     if (lead.status === 'LOST' || lead.status === 'NOT_INTERESTED') throw new AppError('Lost or not-interested leads cannot be converted', 409);
+    if (input.quotationId && !await QuotationModel.exists({ _id: objectId(input.quotationId, 'quotation ID'), lead: lead._id })) throw new AppError('Quotation does not belong to this lead', 400);
     const previousStatus = lead.status;
+    const actorReview = await reviewActor(actorId);
     const customerData = {
+      ...(actorReview.role === 'CP' ? { reviewCp: actorId, reviewRequiredTypes: ['PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK', 'GEO_TAG_PHOTO'] } : {}),
       customerCode: `CUS-${randomBytes(6).toString('hex').toUpperCase()}`,
       sourceLead: lead._id, customerName: lead.customerName, mobileNumber: lead.mobileNumber,
       ...(lead.alternateNumber ? { alternateNumber: lead.alternateNumber } : {}), branch: lead.branch, state: lead.state, district: lead.district,
       ...(lead.blockOrTehsil ? { blockOrTehsil: lead.blockOrTehsil } : {}), siteAddress: lead.siteAddress,
       requiredCapacityKW: input.requiredCapacityKW, ratePerKW: input.ratePerKW, paymentMode: input.paymentMode,
-      panelBrand: input.panelBrand, panelTechnology: input.panelTechnology, status: 'ONBOARDING', creatorId: lead.creatorId, updatedBy: actorId
+      panelBrand: input.panelBrand, panelTechnology: input.panelTechnology,
+      ...(input.rate !== undefined ? { rate: input.rate, isFixedRate: true } : {}),
+      ...(input.panelCount !== undefined ? { panelCount: input.panelCount } : {}), ...(input.wattsPerPanel !== undefined ? { wattsPerPanel: input.wattsPerPanel } : {}),
+      ...(input.inverter ? { inverter: input.inverter } : {}), ...(input.systemType ? { systemType: input.systemType } : {}), ...(input.phase ? { phase: input.phase } : {}), ...(input.category ? { category: input.category } : {}), ...(input.inverterBattery ? { inverterBattery: input.inverterBattery } : {}), ...(input.quotationRemark ? { quotationRemark: input.quotationRemark } : {}), ...(input.quotationId ? { quotation: objectId(input.quotationId, 'quotation ID') } : {}),
+      status: 'ONBOARDING', creatorId: lead.creatorId, updatedBy: actorId
     };
     const conversionUploads = await customerDocumentService.prepareLeadConversionUploads(actorId, lead._id, input.documentUploadIds);
     const session = await mongoose.startSession();
@@ -117,14 +135,40 @@ export const customerService = {
     if (!convertedCustomer) throw new AppError('Customer conversion failed', 500);
     return { customer: convertedCustomer, alreadyConverted: false };
   },
-  async list(actorId: Types.ObjectId, pagination: PaginationInput, filters: RecordListFilters & { search?: string; customerType?: 'customer_only' }) {
+  async reviewQueue(actorId: Types.ObjectId) {
+    const actor = await reviewActor(actorId);
+    if (!actor.role || !['MD', 'CP_HEAD', 'RM', 'MIS'].includes(actor.role)) throw new AppError('Only RM, sales uplines and MIS can view new customers', 403);
+    const allowedIds = await customerScope(actorId);
+    const customers = await CustomerModel.find(allowedIds ? { _id: { $in: allowedIds } } : {}).select('customerName customerCode mobileNumber status reviewRequiredTypes createdAt').sort({ createdAt: -1 }).lean();
+    const documents = await currentDocuments(customers.map(customer => customer._id));
+    return customers.flatMap(customer => {
+      const current = documents.get(String(customer._id));
+      const required = customer.reviewRequiredTypes?.length ? customer.reviewRequiredTypes : ['PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK', ...(current?.has('GEO_TAG_PHOTO') ? ['GEO_TAG_PHOTO'] : [])];
+      if (actor.role === 'MIS') {
+        if (!reviewComplete(required, current) || misReviewComplete(required, current)) return [];
+        return [{ ...customer, reviewStatus: 'MIS_PENDING' }];
+      }
+      if (reviewComplete(required, current)) return [];
+      const reviewStatus = required.some(type => current?.get(type)?.verificationStatus === 'REJECTED') ? 'REJECTED' : 'PENDING';
+      return [{ ...customer, reviewStatus }];
+    });
+  },
+  async holdCustomers(actorId: Types.ObjectId) {
+    const actor = await reviewActor(actorId);
+    if (actor.role !== 'CP') throw new AppError('Only channel partners can view held customers', 403);
+    const customers = await CustomerModel.find({ reviewCp: actorId }).select('customerName customerCode mobileNumber status reviewRequiredTypes').sort({ createdAt: -1 }).lean();
+    const documents = await currentDocuments(customers.map(customer => customer._id));
+    return customers.filter(customer => [...(documents.get(String(customer._id))?.values() ?? [])].some(document => document.verificationStatus === 'REJECTED'));
+  },
+  async list(actorId: Types.ObjectId, pagination: PaginationInput, filters: RecordListFilters & { search?: string; customerType?: 'customer_only'; creatorId?: string }) {
     const ids = await customerScope(actorId);
     const query: Record<string, unknown> = {};
     if (ids) query._id = { $in: ids };
     if (filters.customerType === 'customer_only') query.cpEmployee = null;
+    if (filters.creatorId) query.creatorId = objectId(filters.creatorId, 'creator ID');
     if (filters.employeeName) {
       const employeeScope = await resolveEmployeeScope(actorId, filters.employeeName, await accessibleEmployeeScope(actorId));
-      if (employeeScope) query.$and = [{ $or: [{ creatorId: { $in: employeeScope } }, { cpEmployee: { $in: employeeScope } }] }];
+      if (employeeScope) query.$and = [{ $or: [{ creatorId: { $in: employeeScope } }, { cpEmployee: { $in: employeeScope } }, { reviewCp: { $in: employeeScope } }] }];
     }
     const branchId = await resolveBranchId(filters.branchId);
     if (branchId) query.branch = branchId;
@@ -140,7 +184,7 @@ export const customerService = {
     const customerId = objectId(customerIdValue, 'customer ID');
     const customer = await assertCustomerAccess(actorId, customerId, 'read');
     const [documents, lead, leadStatusHistory, visits, activities, quotations, amcContracts] = await Promise.all([
-      CustomerDocumentModel.find({ customer: customer._id }).select('-s3Key').populate('uploadedBy', 'employeeCode firstName lastName').populate('verifiedBy', 'employeeCode firstName lastName').sort({ uploadedAt: -1 }).lean(),
+      CustomerDocumentModel.find({ customer: customer._id }).select('-s3Key').populate('uploadedBy', 'employeeCode firstName lastName').populate('verifiedBy', 'employeeCode firstName lastName').populate('misVerifiedBy', 'employeeCode firstName lastName').sort({ uploadedAt: -1, _id: -1 }).lean(),
       LeadModel.findById(customer.sourceLead).select('-__v').populate('creatorId', 'employeeCode firstName lastName').lean(),
       LeadStatusHistoryModel.find({ lead: customer.sourceLead }).populate('changedBy', 'employeeCode firstName lastName').sort({ changedAt: -1 }).lean(),
       VisitModel.find({ lead: customer.sourceLead }).populate('visitedBy', 'employeeCode firstName lastName').sort({ visitDate: -1 }).lean(),
@@ -156,6 +200,7 @@ export const customerService = {
     const fields = ['customerName', 'mobileNumber', 'alternateNumber', 'siteAddress', 'blockOrTehsil', 'requiredCapacityKW', 'ratePerKW', 'paymentMode', 'panelBrand', 'panelTechnology', 'status'] as const;
     const changed: string[] = [];
     for (const field of fields) if (input[field] !== undefined) { (customer as unknown as Record<string, unknown>)[field] = input[field]; changed.push(field); }
+    if (customer.isFixedRate && input.ratePerKW !== undefined) customer.rate = Number(input.ratePerKW);
     if (!changed.length) throw new AppError('No customer fields to update', 400);
     customer.updatedBy = actorId; await customer.save();
     await CustomerActivityModel.create({ customer: customer._id, action: 'UPDATED', description: `Updated: ${changed.join(', ')}`, actor: actorId });

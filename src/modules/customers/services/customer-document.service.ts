@@ -1,3 +1,7 @@
+import { CustomerModel } from '../models/customer.model.js';
+import { reviewActor, currentDocuments, reviewComplete } from './customer-review.service.js';
+import { EmployeeModel } from '../../employees/models/employee.model.js';
+import { canAccessAssignedLead } from '../../leads/services/lead-assignment-access.js';
 import { assertCpCustomerAccess } from './cp-customer-access.service.js';
 import { randomUUID } from 'node:crypto';
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
@@ -13,7 +17,8 @@ import { LeadModel } from '../../leads/models/lead.model.js';
 import { hierarchyService } from '../../employees/services/hierarchy.service.js';
 import { assertCustomerAccess } from './customer-access.service.js';
 
-export const CUSTOMER_DOCUMENT_TYPES = ['PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK'] as const;
+export const CUSTOMER_DOCUMENT_TYPES = ['PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK', 'GEO_TAG_PHOTO'] as const;
+const requiredConversionTypes = (subject: 'lead' | 'cp') => subject === 'cp' ? CUSTOMER_DOCUMENT_TYPES.filter(type => type !== 'GEO_TAG_PHOTO') : [...CUSTOMER_DOCUMENT_TYPES];
 export type CustomerDocumentType = typeof CUSTOMER_DOCUMENT_TYPES[number];
 const MIME_EXTENSIONS = new Map([['application/pdf', 'pdf'], ['image/jpeg', 'jpg'], ['image/png', 'png'], ['image/webp', 'webp']]);
 const UPLOAD_TTL_SECONDS = 600;
@@ -52,19 +57,21 @@ async function conversionSubject(actorId: Types.ObjectId, value: string, subject
     if (cp.sourceCustomer) throw new AppError('This CP is already a customer', 409);
     return { cpEmployee: cp._id };
   }
-  const lead = await LeadModel.findById(parsed).select('creatorId');
-  if (!lead || !await hierarchyService.canAccessResource(actorId, lead.creatorId, 'lead')) throw new AppError('Lead not found', 404);
+  const lead = await LeadModel.findById(parsed).select('creatorId assignedTo');
+  if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'lead') && !await canAccessAssignedLead(actorId, lead.assignedTo))) throw new AppError('Lead not found', 404);
   return { lead: lead._id };
 }
 
 export const customerDocumentService = {
   async createLeadConversionUploadUrls(actorId: Types.ObjectId, leadId: string, documents: Array<{ documentType: CustomerDocumentType; fileName: string; mimeType: string; fileSize: number }>, subject: 'lead' | 'cp' = 'lead') {
     const scope = await conversionSubject(actorId, leadId, subject);
-    if (documents.length !== CUSTOMER_DOCUMENT_TYPES.length || new Set(documents.map(({ documentType }) => documentType)).size !== CUSTOMER_DOCUMENT_TYPES.length || CUSTOMER_DOCUMENT_TYPES.some((type) => !documents.some((document) => document.documentType === type))) {
-      throw new AppError('Upload exactly one of each required customer document: PAN, AADHAAR, ELECTRICITY_BILL, and BANK_PASSBOOK', 400);
+    const requiredTypes = requiredConversionTypes(subject);
+    if (documents.length !== requiredTypes.length || new Set(documents.map(({ documentType }) => documentType)).size !== requiredTypes.length || requiredTypes.some((type) => !documents.some((document) => document.documentType === type))) {
+      throw new AppError('Upload exactly one of each required customer document: PAN, AADHAAR, ELECTRICITY_BILL, BANK_PASSBOOK, and a geotag photo when required', 400);
     }
     for (const input of documents) {
       if (!MIME_EXTENSIONS.has(input.mimeType)) throw new AppError('Only PDF, JPEG, PNG, and WebP documents are accepted', 400);
+      if (input.documentType === 'GEO_TAG_PHOTO' && !input.mimeType.startsWith('image/')) throw new AppError('Geotag photo must be a JPEG, PNG, or WebP image', 400);
       if (!Number.isInteger(input.fileSize) || input.fileSize < 1 || input.fileSize > env.customerDocumentMaxSizeBytes) throw new AppError('Document size exceeds the configured limit', 400);
     }
     storage();
@@ -149,7 +156,8 @@ export const customerDocumentService = {
   },
   async prepareLeadConversionUploads(actorId: Types.ObjectId, leadId: Types.ObjectId, uploadIds: string[], subject: 'lead' | 'cp' = 'lead') {
     const scope = subject === 'cp' ? { cpEmployee: leadId } : { lead: leadId };
-    if (uploadIds.length !== CUSTOMER_DOCUMENT_TYPES.length || uploadIds.some((id) => !Types.ObjectId.isValid(id)) || new Set(uploadIds).size !== CUSTOMER_DOCUMENT_TYPES.length) {
+    const requiredTypes = requiredConversionTypes(subject);
+    if (uploadIds.length !== requiredTypes.length || uploadIds.some((id) => !Types.ObjectId.isValid(id)) || new Set(uploadIds).size !== requiredTypes.length) {
       throw new AppError('Upload one file for each required customer document before conversion', 400);
     }
     const uploads = await CustomerDocumentUploadModel.find({
@@ -161,14 +169,14 @@ export const customerDocumentService = {
       expiresAt: { $gt: new Date() }
     });
     const suppliedTypes = new Set(uploads.map((upload) => upload.documentType));
-    if (uploads.length !== CUSTOMER_DOCUMENT_TYPES.length || CUSTOMER_DOCUMENT_TYPES.some((type) => !suppliedTypes.has(type))) {
-      throw new AppError('Upload one file for each required customer document: PAN, AADHAAR, ELECTRICITY_BILL, and BANK_PASSBOOK', 400);
+    if (uploads.length !== requiredTypes.length || requiredTypes.some((type) => !suppliedTypes.has(type))) {
+      throw new AppError('Upload one file for each required customer document: PAN, AADHAAR, ELECTRICITY_BILL, BANK_PASSBOOK, and a geotag photo when required', 400);
     }
     const claimed = await CustomerDocumentUploadModel.updateMany(
       { _id: { $in: uploads.map((upload) => upload._id) }, ...scope, owner: actorId, status: 'PENDING', uploadedAt: { $ne: null }, expiresAt: { $gt: new Date() } },
       { $set: { status: 'VERIFYING' } }
     );
-    if (claimed.modifiedCount !== CUSTOMER_DOCUMENT_TYPES.length) throw new AppError('Document uploads have expired or are already being used; upload them again', 409);
+    if (claimed.modifiedCount !== requiredTypes.length) throw new AppError('Document uploads have expired or are already being used; upload them again', 409);
 
     try {
       const storageClient = storage();
@@ -224,7 +232,14 @@ export const customerDocumentService = {
   },
   async createUploadUrl(actorId: Types.ObjectId, customerId: string, input: { documentType: CustomerDocumentType; fileName: string; mimeType: string; fileSize: number }) {
     const customer = await assertCustomerAccess(actorId, parseId(customerId, 'customer ID'));
+    if (customer.reviewCp) {
+      const actor = await reviewActor(actorId);
+      if (actor.role !== 'CP' || !customer.reviewCp.equals(actorId)) throw new AppError('Only the submitting channel partner can replace a rejected document', 403);
+      const latest = await CustomerDocumentModel.findOne({ customer: customer._id, documentType: input.documentType }).sort({ uploadedAt: -1, _id: -1 });
+      if (!customer.reviewRequiredTypes?.includes(input.documentType) || (latest && latest.verificationStatus !== 'REJECTED')) throw new AppError('Only a missing or rejected required document can be uploaded', 409);
+    }
     const ext = MIME_EXTENSIONS.get(input.mimeType);
+    if (input.documentType === 'GEO_TAG_PHOTO' && !input.mimeType.startsWith('image/')) throw new AppError('Geotag photo must be an image', 400);
     if (!ext) throw new AppError('Only PDF, JPEG, PNG, and WebP documents are accepted', 400);
     if (!Number.isInteger(input.fileSize) || input.fileSize < 1 || input.fileSize > env.customerDocumentMaxSizeBytes) throw new AppError('Document size exceeds the configured limit', 400);
     const key = `customer-documents/${customer._id.toString()}/${randomUUID()}.${ext}`;
@@ -235,6 +250,22 @@ export const customerDocumentService = {
       const url = await getSignedUrl(storage(), command, { expiresIn: UPLOAD_TTL_SECONDS });
       return { uploadId: upload._id.toString(), uploadUrl: url, expiresAt };
     } catch (error) { await CustomerDocumentUploadModel.deleteOne({ _id: upload._id }); throw error; }
+  },
+  async uploadCustomerDocument(actorId: Types.ObjectId, customerId: string, uploadId: string, contentType: string, bytes: Uint8Array) {
+    const customer = await assertCustomerAccess(actorId, parseId(customerId, 'customer ID'));
+    if (!MIME_EXTENSIONS.has(contentType) || !bytes.byteLength || bytes.byteLength > env.customerDocumentMaxSizeBytes || !verifyMagic(contentType, bytes)) throw new AppError('Document content or type is invalid', 400);
+    const claimed = await CustomerDocumentUploadModel.findOneAndUpdate({ _id: parseId(uploadId, 'document upload ID'), customer: customer._id, owner: actorId, contentType, size: bytes.byteLength, status: 'PENDING', uploadedAt: null, expiresAt: { $gt: new Date() } }, { $set: { status: 'UPLOADING' } }, { new: true });
+    if (!claimed) throw new AppError('Document upload is invalid, expired, or already in progress', 409);
+    try {
+      await storage().send(new PutObjectCommand({ Bucket: env.awsCustomerDocumentBucketName, Key: claimed.key, Body: Buffer.from(bytes), ContentLength: bytes.byteLength, ContentType: contentType, ServerSideEncryption: 'AES256', Metadata: { customer: String(customer._id), uploader: String(actorId) } }));
+      const result = await CustomerDocumentUploadModel.updateOne({ _id: claimed._id, status: 'UPLOADING' }, { $set: { status: 'PENDING', uploadedAt: new Date() } });
+      if (!result.modifiedCount) throw new AppError('Unable to record uploaded document', 409);
+      return { uploadId: String(claimed._id) };
+    } catch (error) {
+      await CustomerDocumentUploadModel.updateOne({ _id: claimed._id, status: 'UPLOADING' }, { $set: { status: 'REVOKED' } });
+      if (error instanceof AppError) throw error;
+      throw new AppError('Customer document upload failed in storage', 503);
+    }
   },
   async completeUpload(actorId: Types.ObjectId, customerId: string, uploadId: string) {
     if (!Types.ObjectId.isValid(customerId) || !Types.ObjectId.isValid(uploadId)) throw new AppError('Invalid customer or upload ID', 400);
@@ -258,6 +289,14 @@ export const customerDocumentService = {
       if (error instanceof AppError) throw error;
       throw new AppError('Unable to verify uploaded customer document', 400);
     }
+    if (customer.reviewCp) {
+      const actor = await reviewActor(actorId);
+      const latest = await CustomerDocumentModel.findOne({ customer: customer._id, documentType: upload.documentType }).sort({ uploadedAt: -1, _id: -1 });
+      if (actor.role !== 'CP' || !customer.reviewCp.equals(actorId) || !customer.reviewRequiredTypes?.includes(upload.documentType) || (latest && latest.verificationStatus !== 'REJECTED')) {
+        upload.status = 'REVOKED'; await upload.save();
+        throw new AppError('This document is no longer eligible for replacement', 409);
+      }
+    }
     let document;
     try {
       document = await CustomerDocumentModel.create({ customer: customer._id, documentType: upload.documentType, fileName: upload.fileName, s3Key: upload.key, mimeType: upload.contentType, fileSize: upload.size, uploadedBy: actorId, verificationStatus: 'PENDING', uploadReservation: upload._id });
@@ -266,12 +305,19 @@ export const customerDocumentService = {
       throw error;
     }
     upload.status = 'COMPLETED'; await upload.save();
+    if (!customer.reviewCp) {
+      const actor = await reviewActor(actorId);
+      if (actor.role === 'CP') {
+        const hasPhoto = upload.documentType === 'GEO_TAG_PHOTO' || await CustomerDocumentModel.exists({ customer: customer._id, documentType: 'GEO_TAG_PHOTO' });
+        await CustomerModel.updateOne({ _id: customer._id, reviewCp: { $exists: false } }, { $set: { reviewCp: actorId, reviewRequiredTypes: ['PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK', ...(hasPhoto ? ['GEO_TAG_PHOTO'] : [])] } });
+      }
+    }
     await CustomerActivityModel.create({ customer: customer._id, action: 'DOCUMENT_UPLOADED', description: `${upload.documentType} document uploaded`, actor: actorId });
     return document;
   },
   async list(actorId: Types.ObjectId, customerId: string) {
     const customer = await assertCustomerAccess(actorId, parseId(customerId, 'customer ID'), 'read');
-    return CustomerDocumentModel.find({ customer: customer._id }).select('-s3Key').populate('uploadedBy', 'employeeCode firstName lastName').populate('verifiedBy', 'employeeCode firstName lastName').sort({ uploadedAt: -1 }).lean();
+    return CustomerDocumentModel.find({ customer: customer._id }).select('-s3Key').populate('uploadedBy', 'employeeCode firstName lastName').populate('verifiedBy', 'employeeCode firstName lastName').populate('misVerifiedBy', 'employeeCode firstName lastName').sort({ uploadedAt: -1, _id: -1 }).lean();
   },
   async downloadUrl(actorId: Types.ObjectId, customerId: string, documentId: string) {
     const customer = await assertCustomerAccess(actorId, parseId(customerId, 'customer ID'), 'read');
@@ -294,13 +340,40 @@ export const customerDocumentService = {
     const url = await getSignedUrl(storage(), command, { expiresIn: 300 });
     return { url, contentType: document.mimeType, expiresInSeconds: 300 };
   },
+  async misVerify(actorId: Types.ObjectId, customerId: string, documentId: string, status: 'VERIFIED' | 'PENDING', remark?: string) {
+    const actor = await reviewActor(actorId);
+    if (actor.role !== 'MIS') throw new AppError('Only MIS can perform this review', 403);
+    const customer = await assertCustomerAccess(actorId, parseId(customerId, 'customer ID'), 'read');
+    const docs = await currentDocuments([customer._id]);
+    const current = docs.get(String(customer._id));
+    const required = customer.reviewRequiredTypes?.length ? customer.reviewRequiredTypes : ['PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK', ...(current?.has('GEO_TAG_PHOTO') ? ['GEO_TAG_PHOTO'] : [])];
+    if (!reviewComplete(required, current)) throw new AppError('All required documents must be verified by the RM first', 409);
+    const document = await CustomerDocumentModel.findOne({ _id: parseId(documentId, 'document ID'), customer: customer._id });
+    if (!document) throw new AppError('Customer document not found', 404);
+    const latest = await CustomerDocumentModel.findOne({ customer: customer._id, documentType: document.documentType }).sort({ uploadedAt: -1, _id: -1 });
+    if (!latest || !latest._id.equals(document._id) || document.verificationStatus !== 'VERIFIED' || !required.includes(document.documentType)) throw new AppError('Only the current required RM-verified document can be reviewed', 409);
+    if (status === 'PENDING' && !remark?.trim()) throw new AppError('A remark is required for a pending document', 400);
+    const updated = await CustomerDocumentModel.findOneAndUpdate({ _id: document._id, verificationStatus: 'VERIFIED' }, { $set: { misVerificationStatus: status, misVerificationRemark: remark?.trim() || null, misVerifiedBy: actorId, misVerifiedAt: new Date() } }, { new: true });
+    if (!updated) throw new AppError('Document status changed; refresh and try again', 409);
+    await CustomerActivityModel.create({ customer: customer._id, action: 'DOCUMENT_VERIFIED', description: `MIS marked ${document.documentType} ${status}${remark ? `: ${remark.trim()}` : ''}`, actor: actorId });
+    return updated;
+  },
   async verify(actorId: Types.ObjectId, customerId: string, documentId: string, status: 'VERIFIED' | 'REJECTED', remark?: string) {
     const customer = await assertCustomerAccess(actorId, parseId(customerId, 'customer ID'));
     const document = await CustomerDocumentModel.findOne({ _id: parseId(documentId, 'document ID'), customer: customer._id });
     if (!document) throw new AppError('Customer document not found', 404);
-    document.verificationStatus = status; document.verifiedBy = actorId; document.verifiedAt = new Date(); document.verificationRemark = remark || null;
-    await document.save();
+    const actor = await reviewActor(actorId);
+    if (actor.role === 'MIS') throw new AppError('MIS must use the MIS document review', 403);
+    if (customer.reviewCp) {
+      const cp = await EmployeeModel.findById(customer.reviewCp).select('reportingTo isActive').lean();
+      if (actor.role !== 'RM' || !cp?.isActive || !cp.reportingTo?.equals(actorId)) throw new AppError('Only the channel partner?s reporting RM can review this document', 403);
+      const latest = await CustomerDocumentModel.findOne({ customer: customer._id, documentType: document.documentType }).sort({ uploadedAt: -1, _id: -1 });
+      if (!latest || !latest._id.equals(document._id) || document.verificationStatus !== 'PENDING') throw new AppError('Only the latest pending document can be reviewed', 409);
+    }
+    if (status === 'REJECTED' && !remark?.trim()) throw new AppError('A rejection remark is required', 400);
+    const updated = await CustomerDocumentModel.findOneAndUpdate({ _id: document._id, verificationStatus: document.verificationStatus }, { $set: { verificationStatus: status, verifiedBy: actorId, verifiedAt: new Date(), verificationRemark: remark?.trim() || null } }, { new: true });
+    if (!updated) throw new AppError('Document status changed; refresh and try again', 409);
     await CustomerActivityModel.create({ customer: customer._id, action: 'DOCUMENT_VERIFIED', description: `${document.documentType} document marked ${status}${remark ? `: ${remark}` : ''}`, actor: actorId });
-    return document;
+    return updated;
   }
 };

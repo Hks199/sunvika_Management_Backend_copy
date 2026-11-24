@@ -153,3 +153,11 @@ test('employee profile image options and editing routes require authentication',
     const response=await fetch(`${baseUrl}/api/v1${path}`,{method});assert.equal(response.status,401);
   }
 });
+
+test('customer review queues and replacement uploads require authentication', async () => {
+  const customer = '0123456789abcdef01234567', upload = '1123456789abcdef01234567';
+  for (const [method, path] of [['GET', '/customers/hold'], ['GET', '/customers/review-queue'], ['PUT', `/customers/${customer}/documents/${upload}/upload`], ['PATCH', `/customers/${customer}/documents/${upload}/verification`], ['PATCH', `/customers/${customer}/documents/${upload}/mis-verification`]]) {
+    const response = await fetch(`${baseUrl}/api/v1${path}`, { method });
+    assert.equal(response.status, 401, `${method} ${path}`);
+  }
+});

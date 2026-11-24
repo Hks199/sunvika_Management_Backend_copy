@@ -1,3 +1,4 @@
+import { grantRmLeadAssignment } from './modules/roles/services/role.service.js';
 import { startCpImportWorker } from './modules/cp-imports/cp-import.service.js';
 import { retireAdminHeadRole } from './modules/roles/services/retire-admin-head.js';
 import { startCallingDistributionWorker } from './modules/calling-lists/calling-bulk.service.js';
@@ -12,6 +13,7 @@ async function start(): Promise<void> {
   await connectDatabase();
   await migrateSystemRoleNames();
   await retireAdminHeadRole();
+  await grantRmLeadAssignment();
   const stopCpImports = startCpImportWorker();
   const stopCpReminders = startCpReminderWorker();
   const stopCallingWorker = startCallingDistributionWorker();

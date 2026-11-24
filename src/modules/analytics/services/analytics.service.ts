@@ -1,3 +1,4 @@
+import { customerScope } from '../../customers/services/customer-access.service.js';
 import { hasOrganizationVisibility } from '../../employees/services/visibility-policy.js';
 import { linkedCustomerLeadIds } from '../../customers/services/customer-linked-access.service.js';
 import { Types } from 'mongoose';
@@ -50,7 +51,12 @@ async function scope(actorId: string, f: Filters) {
   if (employeeIds) leadMatch._id = { $in: await LeadModel.find({ $or: [{ creatorId: { $in: employeeIds } }, { _id: { $in: await linkedCustomerLeadIds(employeeIds) } }] }).distinct('_id') };
   if (f.leadStatus) leadMatch.status = f.leadStatus;
   const customerMatch: Record<string, unknown> = { ...geo, ...inDateRange('createdAt', f) };
-  if (employeeIds) customerMatch._id = { $in: await CustomerModel.find({ $or: [{ creatorId: { $in: employeeIds } }, { cpEmployee: { $in: employeeIds } }] }).distinct('_id') };
+  if (employeeIds) customerMatch._id = { $in: await CustomerModel.find({ $or: [{ creatorId: { $in: employeeIds } }, { cpEmployee: { $in: employeeIds } }, { reviewCp: { $in: employeeIds } }] }).distinct('_id') };
+  if (role?.code === 'MIS') {
+    const visible = await customerScope(new Types.ObjectId(actorId));
+    const existing = customerMatch._id as { $in: Types.ObjectId[] } | undefined;
+    if (visible) customerMatch._id = { $in: existing ? existing.$in.filter(value => visible.some(id => id.equals(value))) : visible };
+  }
   if (f.customerStatus) customerMatch.status = f.customerStatus;
   return { actor, role, employeeIds, leadMatch, customerMatch };
 }

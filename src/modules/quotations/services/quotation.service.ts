@@ -1,3 +1,4 @@
+import { canAccessAssignedLead } from '../../leads/services/lead-assignment-access.js';
 import { hasOrganizationVisibility, type AccessMode } from '../../employees/services/visibility-policy.js';
 import { linkedCustomerLeadIds, canAccessConvertedLead } from '../../customers/services/customer-linked-access.service.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -40,12 +41,12 @@ async function leadScope(actorId: Types.ObjectId): Promise<Types.ObjectId[] | nu
   if (!role) throw new AppError('Employee role is unavailable', 403);
   if (hasOrganizationVisibility(role.code) || role.category === 'ADMIN_HEAD') return null;
   const ids = await hierarchyService.getDownlineEmployeeIds(actorId);
-  return LeadModel.find({ $or: [{ creatorId: { $in: ids } }, { _id: { $in: await linkedCustomerLeadIds(ids) } }] }).distinct('_id');
+  return LeadModel.find({ $or: [{ creatorId: { $in: ids } }, { assignedTo: { $in: ids } }, { _id: { $in: await linkedCustomerLeadIds(ids) } }] }).distinct('_id');
 }
 async function assertQuotationAccess(actorId: Types.ObjectId, quoteId: string, accessMode: AccessMode = 'manage') {
   const quote = await QuotationModel.findById(parseId(quoteId, 'quotation ID'));
-  const lead = quote ? await LeadModel.findById(quote.lead).select('creatorId').lean() : null;
-  if (!quote || !lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'quotation', accessMode) && !await canAccessConvertedLead(actorId, lead._id))) throw new AppError('Quotation not found', 404);
+  const lead = quote ? await LeadModel.findById(quote.lead).select('creatorId assignedTo').lean() : null;
+  if (!quote || !lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'quotation', accessMode) && !await canAccessConvertedLead(actorId, lead._id) && !await canAccessAssignedLead(actorId, lead.assignedTo, accessMode))) throw new AppError('Quotation not found', 404);
   return { quote, lead };
 }
 async function nextNumber(prefix: 'QTN' | 'BR'): Promise<string> {
@@ -76,7 +77,7 @@ interface QuotationInput {
 export const quotationService = {
   async create(actorId: Types.ObjectId, input: QuotationInput) {
     const lead = await LeadModel.findById(parseId(input.leadId, 'lead ID'));
-    if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'quotation') && !await canAccessConvertedLead(actorId, lead._id))) throw new AppError('Lead not found', 404);
+    if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'quotation') && !await canAccessConvertedLead(actorId, lead._id) && !await canAccessAssignedLead(actorId, lead.assignedTo))) throw new AppError('Lead not found', 404);
     if (lead.status !== 'QUOTATION_SENT') throw new AppError('A quotation can only be generated for a lead with QUOTATION_SENT status', 409);
     const { modern, capacity, rate, total } = calculateQuotation(input);
     if (modern) {
@@ -133,7 +134,7 @@ export const quotationService = {
     if (filters.employeeName) {
       const accessibleEmployees = await accessibleEmployeeScope(actorId);
       const employeeIds = await resolveEmployeeScope(actorId, filters.employeeName, accessibleEmployees);
-      const leadQuery: Record<string, unknown> = { $or: [{ creatorId: { $in: employeeIds ?? [] } }, { _id: { $in: await linkedCustomerLeadIds(employeeIds ?? []) } }] };
+      const leadQuery: Record<string, unknown> = { $or: [{ creatorId: { $in: employeeIds ?? [] } }, { assignedTo: { $in: employeeIds ?? [] } }, { _id: { $in: await linkedCustomerLeadIds(employeeIds ?? []) } }] };
       if (leadIds) leadQuery._id = { $in: leadIds };
       leadIds = await LeadModel.find(leadQuery).distinct('_id');
     }
@@ -147,8 +148,8 @@ export const quotationService = {
     if (leadIds) query.lead = { $in: leadIds };
     if (filters.leadId) {
       const leadObjectId = parseId(filters.leadId, 'lead ID');
-      const lead = await LeadModel.findById(leadObjectId).select('creatorId').lean();
-      if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'quotation', 'read') && !await canAccessConvertedLead(actorId, lead._id))) throw new AppError('Lead not found', 404);
+      const lead = await LeadModel.findById(leadObjectId).select('creatorId assignedTo').lean();
+      if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'quotation', 'read') && !await canAccessConvertedLead(actorId, lead._id) && !await canAccessAssignedLead(actorId, lead.assignedTo, 'read'))) throw new AppError('Lead not found', 404);
       query.lead = leadIds
         ? { $in: leadIds.filter((id) => id.equals(leadObjectId)) }
         : leadObjectId;

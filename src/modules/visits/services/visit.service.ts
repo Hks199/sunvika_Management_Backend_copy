@@ -1,3 +1,4 @@
+import { canAccessAssignedLead } from '../../leads/services/lead-assignment-access.js';
 import { hasOrganizationVisibility, type AccessMode } from '../../employees/services/visibility-policy.js';
 import { linkedCustomerLeadIds, canAccessConvertedLead } from '../../customers/services/customer-linked-access.service.js';
 import { Types } from 'mongoose';
@@ -21,12 +22,12 @@ async function actorLeadScope(actorId: Types.ObjectId): Promise<Types.ObjectId[]
   if (!role) throw new AppError('Employee role is unavailable', 403);
   if (hasOrganizationVisibility(role.code) || role.category === 'ADMIN_HEAD') return null;
   const creatorIds = await hierarchyService.getDownlineEmployeeIds(actorId);
-  return LeadModel.find({ $or: [{ creatorId: { $in: creatorIds } }, { _id: { $in: await linkedCustomerLeadIds(creatorIds) } }] }).distinct('_id');
+  return LeadModel.find({ $or: [{ creatorId: { $in: creatorIds } }, { assignedTo: { $in: creatorIds } }, { _id: { $in: await linkedCustomerLeadIds(creatorIds) } }] }).distinct('_id');
 }
 
 async function assertLeadAccess(actorId: Types.ObjectId, leadId: Types.ObjectId, accessMode: AccessMode = 'manage') {
-  const lead = await LeadModel.findById(leadId).select('creatorId').lean();
-  if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'visit', accessMode) && !await canAccessConvertedLead(actorId, lead._id))) throw new AppError('Lead not found', 404);
+  const lead = await LeadModel.findById(leadId).select('creatorId assignedTo').lean();
+  if (!lead || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'visit', accessMode) && !await canAccessConvertedLead(actorId, lead._id) && !await canAccessAssignedLead(actorId, lead.assignedTo, accessMode))) throw new AppError('Lead not found', 404);
   return lead;
 }
 
@@ -83,9 +84,9 @@ export const visitService = {
     return pageVisits(query, pagination);
   },
   async get(actorId: Types.ObjectId, visitId: string) {
-    const visit = await VisitModel.findById(objectId(visitId, 'visit ID')).populate({ path: 'lead', select: 'leadCode customerName mobileNumber status creatorId' }).populate('visitedBy', 'employeeCode firstName lastName').populate('customer', 'customerCode customerName').lean();
-    const lead = visit?.lead as { _id: Types.ObjectId; creatorId?: Types.ObjectId } | undefined;
-    if (!visit || !lead?.creatorId || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'visit', 'read') && !await canAccessConvertedLead(actorId, lead._id))) throw new AppError('Visit not found', 404);
+    const visit = await VisitModel.findById(objectId(visitId, 'visit ID')).populate({ path: 'lead', select: 'leadCode customerName mobileNumber status creatorId assignedTo' }).populate('visitedBy', 'employeeCode firstName lastName').populate('customer', 'customerCode customerName').lean();
+    const lead = visit?.lead as { _id: Types.ObjectId; creatorId?: Types.ObjectId; assignedTo?: Types.ObjectId } | undefined;
+    if (!visit || !lead?.creatorId || (!await hierarchyService.canAccessResource(actorId, lead.creatorId, 'visit', 'read') && !await canAccessConvertedLead(actorId, lead._id) && !await canAccessAssignedLead(actorId, lead.assignedTo, 'read'))) throw new AppError('Visit not found', 404);
     return visit;
   },
   async update(actorId: Types.ObjectId, visitId: string, input: { visitDate?: Date; remark?: string; nextVisitDate?: Date | null; location?: { latitude?: number; longitude?: number; address?: string } | null }) {

@@ -86,7 +86,8 @@ test('lead conversion requires exactly one upload reservation for each mandatory
     '0123456789abcdef01234567',
     '1123456789abcdef01234567',
     '2123456789abcdef01234567',
-    '3123456789abcdef01234567'
+    '3123456789abcdef01234567',
+    '4123456789abcdef01234567'
   ];
   const conversion = {
     requiredCapacityKW: 5,
@@ -101,15 +102,15 @@ test('lead conversion requires exactly one upload reservation for each mandatory
   assert.ok(convertLeadSchema.validate({ ...conversion, documentUploadIds: documentUploadIds.slice(0, 3) }).error);
   assert.ok(convertLeadSchema.validate({ ...conversion, documentUploadIds: [...documentUploadIds.slice(0, 3), documentUploadIds[0]] }).error);
 
-  const documents = ['PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK'].map((documentType) => ({
+  const documents = ['PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK', 'GEO_TAG_PHOTO'].map((documentType) => ({
     documentType,
     fileName: `${documentType}.pdf`,
-    mimeType: 'application/pdf',
+    mimeType: documentType === 'GEO_TAG_PHOTO' ? 'image/jpeg' : 'application/pdf',
     fileSize: 1024
   }));
   assert.equal(createLeadConversionUploadsSchema.validate({ documents }).error, undefined);
-  assert.ok(createLeadConversionUploadsSchema.validate({ documents: documents.slice(0, 3) }).error);
-  assert.ok(createLeadConversionUploadsSchema.validate({ documents: [...documents.slice(0, 3), { ...documents[3], documentType: 'PAN' }] }).error);
+  assert.ok(createLeadConversionUploadsSchema.validate({ documents: documents.slice(0, 4) }).error);
+  assert.ok(createLeadConversionUploadsSchema.validate({ documents: [...documents.slice(0, 4), { ...documents[4], documentType: 'PAN' }] }).error);
 });
 
 test('record list filters accept branch, date range, and employee name while rejecting reversed dates', () => {
@@ -130,6 +131,8 @@ test('customer type filter validates supported values', () => {
   assert.equal(customerListQuerySchema.validate({ customerType: 'customer_only' }).error, undefined);
   assert.equal(customerListQuerySchema.validate({}).error, undefined);
   assert.ok(customerListQuerySchema.validate({ customerType: 'invalid' }).error);
+  assert.equal(customerListQuerySchema.validate({ creatorId: '0123456789abcdef01234567' }).error, undefined);
+  assert.ok(customerListQuerySchema.validate({ creatorId: 'invalid' }).error);
 });
 
 test('customer-only filtering preserves RM scope, search, and matching pagination counts', async (t) => {
@@ -137,6 +140,8 @@ test('customer-only filtering preserves RM scope, search, and matching paginatio
   const { EmployeeModel } = await import('../dist/modules/employees/models/employee.model.js');
   const { RoleModel } = await import('../dist/modules/roles/models/role.model.js');
   const { CustomerModel } = await import('../dist/modules/customers/models/customer.model.js');
+  const { LeadModel } = await import('../dist/modules/leads/models/lead.model.js');
+  t.mock.method(LeadModel, 'find', () => ({ distinct: async () => [] }));
   const { hierarchyService } = await import('../dist/modules/employees/services/hierarchy.service.js');
   const { customerService } = await import('../dist/modules/customers/services/customer.service.js');
   const actor = new Types.ObjectId(), role = new Types.ObjectId(), customerId = new Types.ObjectId();
@@ -155,6 +160,11 @@ test('customer-only filtering preserves RM scope, search, and matching paginatio
   assert.deepEqual(listQuery._id, { $in: [customerId] });
   assert.equal(listQuery.cpEmployee, null);
   assert.ok(listQuery.$or.length);
+  assert.deepEqual(countQuery, listQuery);
+  const creator = new Types.ObjectId();
+  await customerService.list(actor, { page: 1, limit: 20 }, { creatorId: String(creator) });
+  assert.deepEqual(listQuery._id, { $in: [customerId] });
+  assert.equal(String(listQuery.creatorId), String(creator));
   assert.deepEqual(countQuery, listQuery);
   await customerService.list(actor, { page: 1, limit: 20 }, {});
   assert.deepEqual(listQuery._id, { $in: [customerId] });
@@ -625,6 +635,8 @@ test('customer conversion requires explicit confirmation, valid account details 
 test('linked customer history is visible to the CP upline without exposing unrelated creator records', async (t) => {
   const { Types } = await import('mongoose');
   const { CustomerModel } = await import('../dist/modules/customers/models/customer.model.js');
+  const { LeadModel } = await import('../dist/modules/leads/models/lead.model.js');
+  t.mock.method(LeadModel, 'findById', () => ({ select: () => ({ lean: async () => null }) }));
   const { hierarchyService } = await import('../dist/modules/employees/services/hierarchy.service.js');
   const { assertCustomerAccess } = await import('../dist/modules/customers/services/customer-access.service.js');
   const { canAccessConvertedLead } = await import('../dist/modules/customers/services/customer-linked-access.service.js');
@@ -1084,7 +1096,7 @@ test('MIS business read permissions work for existing roles without granting MD 
   code='RM';assert.equal(await roleService.hasPermission(actor,'employees.read'),false);invalidateRolePermissionCache();
 });
 
-test('MIS read scopes include all teams for employees, CP, leads, customers, visits and quotations', async(t)=>{
+test('MIS read scopes include teams while customers use the document review gate', async(t)=>{
   const {Types}=await import('mongoose');
   const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');
   const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');
@@ -1110,13 +1122,13 @@ test('MIS read scopes include all teams for employees, CP, leads, customers, vis
     t.mock.method(model,'find',query=>{queries.set(model.modelName,query);return chain([]);});
     t.mock.method(model,'countDocuments',async()=>0);
   }
-  assert.equal(await accessibleEmployeeScope(actor),null);assert.equal(await customerScope(actor),null);
+  assert.equal(await accessibleEmployeeScope(actor),null);assert.deepEqual(await customerScope(actor),[]);
   const page={page:1,limit:20};
   await employeeService.listAccessible(actor,page,'staff');assert.deepEqual(queries.get('Employee').$and[0],{});assert.ok(queries.get('Employee').$and[1].role.$nin);
   await employeeService.listAccessible(actor,page,'cp');assert.deepEqual(queries.get('Employee').$and[0],{});assert.ok(queries.get('Employee').$and[1].role.$in);
   await employeeService.getDownline(actor,page,'cp');assert.deepEqual(queries.get('Employee').$and[0],{});
   await leadService.list(actor,page,{});assert.equal(queries.get('Lead').$and,undefined);
-  await customerService.list(actor,page,{});assert.equal(queries.get('Customer')._id,undefined);
+  await customerService.list(actor,page,{});assert.deepEqual(queries.get('Customer')._id,{$in:[]});
   await visitService.list(actor,page,{});assert.equal(queries.get('Visit').lead,undefined);
   await quotationService.list(actor,page,{});assert.equal(queries.get('Quotation').lead,undefined);
 });
@@ -1864,4 +1876,211 @@ test('quotation numbers use India date and customer name and remain unique on re
   t.mock.method(QuotationSequenceModel, 'findOneAndUpdate', async () => ({ value: ++value }));
   assert.equal(await nextQuotationNumber('Mukesh Kumar Sah', time), base);
   assert.equal(await nextQuotationNumber('Mukesh Kumar Sah', time), base + '-2');
+});
+
+test('lead assignments only allow active direct reports in the next sales role', async (t) => {
+  const { Types } = await import('mongoose');
+  const { LeadModel } = await import('../dist/modules/leads/models/lead.model.js');
+  const { EmployeeModel } = await import('../dist/modules/employees/models/employee.model.js');
+  const { RoleModel } = await import('../dist/modules/roles/models/role.model.js');
+  const { CustomerModel } = await import('../dist/modules/customers/models/customer.model.js');
+  const { hierarchyService } = await import('../dist/modules/employees/services/hierarchy.service.js');
+  const { canAccessAssignedLead } = await import('../dist/modules/leads/services/lead-assignment-access.js');
+  const { leadService } = await import('../dist/modules/leads/services/lead.service.js');
+  const md = new Types.ObjectId(), head = new Types.ObjectId(), rm = new Types.ObjectId(), cp = new Types.ObjectId(), mis = new Types.ObjectId(), otherRm = new Types.ObjectId(), leadId = new Types.ObjectId();
+  const roleIds = Object.fromEntries(['MD', 'CP_HEAD', 'RM', 'CP', 'MIS'].map(code => [code, new Types.ObjectId()]));
+  const staff = [
+    { _id: md, role: roleIds.MD, isActive: true },
+    { _id: head, role: roleIds.CP_HEAD, reportingTo: md, isActive: true },
+    { _id: rm, role: roleIds.RM, reportingTo: head, isActive: true },
+    { _id: cp, role: roleIds.CP, reportingTo: rm, isActive: true },
+    { _id: mis, role: roleIds.MIS, reportingTo: md, isActive: true },
+    { _id: otherRm, role: roleIds.RM, reportingTo: md, isActive: true },
+  ];
+  const lead = { _id: leadId, creatorId: md, assignedTo: undefined, save: async () => {} };
+  const query = value => ({ select() { return this; }, populate() { return this; }, sort() { return this; }, async lean() { return value; } });
+  t.mock.method(LeadModel, 'findById', async () => lead);
+  t.mock.method(EmployeeModel, 'findById', id => query(staff.find(x => x._id.equals(id))));
+  t.mock.method(RoleModel, 'findById', id => query({ code: Object.keys(roleIds).find(key => roleIds[key].equals(id)), isActive: true }));
+  t.mock.method(RoleModel, 'findOne', ({ code }) => query({ _id: roleIds[code] }));
+  const matches = (item, filter) => Object.entries(filter).every(([key, value]) => item[key] != null && String(item[key]) === String(value));
+  t.mock.method(EmployeeModel, 'find', filter => query(staff.filter(item => matches(item, filter))));
+  t.mock.method(EmployeeModel, 'findOne', filter => query(staff.find(item => matches(item, filter))));
+  t.mock.method(hierarchyService, 'canAccessResource', async (actor, owner) => {
+    const chain = [md, head, rm, cp]; const a = chain.findIndex(id => id.equals(actor)), b = chain.findIndex(id => id.equals(owner)); return a >= 0 && b >= a;
+  });
+  t.mock.method(CustomerModel, 'findOne', () => query(null));
+  assert.deepEqual((await leadService.assignmentOptions(md, String(leadId))).map(x => String(x._id)), [String(head)]);
+  await assert.rejects(() => leadService.assign(md, String(leadId), String(mis)), /direct report/);
+  await assert.rejects(() => leadService.assign(md, String(leadId), String(rm)), /direct report/);
+  await leadService.assign(md, String(leadId), String(head));
+  assert.deepEqual((await leadService.assignmentOptions(head, String(leadId))).map(x => String(x._id)), [String(rm)]);
+  await assert.rejects(() => leadService.assign(head, String(leadId), String(cp)), /direct report/);
+  await assert.rejects(() => leadService.assign(head, String(leadId), String(otherRm)), /direct report/);
+  await leadService.assign(head, String(leadId), String(rm));
+  assert.deepEqual((await leadService.assignmentOptions(rm, String(leadId))).map(x => String(x._id)), [String(cp)]);
+  await leadService.assign(rm, String(leadId), String(cp));
+  assert.equal(await canAccessAssignedLead(rm, lead.assignedTo), true);
+  assert.equal(await canAccessAssignedLead(mis, lead.assignedTo), false);
+});
+
+test('lead conversion defaults come from the latest authorized quotation', async (t) => {
+  const { Types } = await import('mongoose');
+  const { LeadModel } = await import('../dist/modules/leads/models/lead.model.js');
+  const { QuotationModel } = await import('../dist/modules/quotations/models/quotation.model.js');
+  const { hierarchyService } = await import('../dist/modules/employees/services/hierarchy.service.js');
+  const { customerService } = await import('../dist/modules/customers/services/customer.service.js');
+  const actor = new Types.ObjectId(), leadId = new Types.ObjectId(), quoteId = new Types.ObjectId();
+  t.mock.method(LeadModel, 'findById', async () => ({ _id: leadId, creatorId: actor }));
+  t.mock.method(hierarchyService, 'canAccessResource', async () => true);
+  let sort;
+  const quote = { _id: quoteId, quotationNumber: 'QTN-TEST', requiredCapacityKW: Types.Decimal128.fromString('3.5'), rate: Types.Decimal128.fromString('180000'), totalProjectAmount: Types.Decimal128.fromString('180000'), panelCount: 7, wattsPerPanel: 500, panelBrand: 'Brand', panelTechnology: 'Mono', paymentMode: 'Cash', inverter: 'Inverter', systemType: 'On grid', phase: '1-Phase', category: 'Residential', termsAndConditions: 'Sample remark' };
+  t.mock.method(QuotationModel, 'findOne', () => ({ sort(value) { sort = value; return this; }, select() { return this; }, async lean() { return quote; } }));
+  const result = await customerService.conversionOptions(actor, String(leadId));
+  assert.deepEqual(sort, { version: -1 });
+  assert.equal(result.quotation.quotationId, String(quoteId));
+  assert.equal(result.quotation.requiredCapacityKW, 3.5);
+  assert.equal(result.quotation.rate, 180000);
+  assert.equal(result.quotation.panelCount, 7);
+  assert.equal(result.quotation.quotationRemark, 'Sample remark');
+});
+
+test('document review uses current versions and requires every required document', async (t) => {
+  const { Types } = await import('mongoose');
+  const { CustomerDocumentModel } = await import('../dist/modules/customers/models/customer-document.model.js');
+  const { currentDocuments, reviewComplete } = await import('../dist/modules/customers/services/customer-review.service.js');
+  const { verifyDocumentSchema } = await import('../dist/modules/customers/validations/customer.validation.js');
+  const id = new Types.ObjectId();
+  const docs = [
+    { customer: id, documentType: 'PAN', verificationStatus: 'PENDING' },
+    { customer: id, documentType: 'PAN', verificationStatus: 'REJECTED' },
+    { customer: id, documentType: 'AADHAAR', verificationStatus: 'VERIFIED' }
+  ];
+  t.mock.method(CustomerDocumentModel, 'find', () => ({ select() { return this; }, sort() { return this; }, async lean() { return docs; } }));
+  const current = (await currentDocuments([id])).get(String(id));
+  assert.equal(current.get('PAN').verificationStatus, 'PENDING');
+  assert.equal(reviewComplete(['PAN', 'AADHAAR'], current), false);
+  current.get('PAN').verificationStatus = 'VERIFIED';
+  assert.equal(reviewComplete(['PAN', 'AADHAAR'], current), true);
+  assert.equal(reviewComplete(['PAN', 'AADHAAR', 'GEO_TAG_PHOTO'], current), false);
+  assert.ok(verifyDocumentSchema.validate({ status: 'REJECTED', remark: '  ' }).error);
+  assert.equal(verifyDocumentSchema.validate({ status: 'REJECTED', remark: 'Please upload a clearer image' }).error, undefined);
+});
+
+test('only the submitting CP reporting RM may review a current pending document', async (t) => {
+  const { Types } = await import('mongoose');
+  const { EmployeeModel } = await import('../dist/modules/employees/models/employee.model.js');
+  const { RoleModel } = await import('../dist/modules/roles/models/role.model.js');
+  const { CustomerModel } = await import('../dist/modules/customers/models/customer.model.js');
+  const { CustomerDocumentModel } = await import('../dist/modules/customers/models/customer-document.model.js');
+  const { CustomerActivityModel } = await import('../dist/modules/customers/models/customer-activity.model.js');
+  const { hierarchyService } = await import('../dist/modules/employees/services/hierarchy.service.js');
+  const { customerDocumentService } = await import('../dist/modules/customers/services/customer-document.service.js');
+  const rm = new Types.ObjectId(), otherRm = new Types.ObjectId(), cp = new Types.ObjectId(), role = new Types.ObjectId(), customerId = new Types.ObjectId(), docId = new Types.ObjectId();
+  const customer = { _id: customerId, creatorId: cp, reviewCp: cp, reviewRequiredTypes: ['PAN'] };
+  const doc = { _id: docId, documentType: 'PAN', verificationStatus: 'PENDING' };
+  const query = value => ({ select() { return this; }, sort() { return this; }, async lean() { return value; }, then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); } });
+  t.mock.method(CustomerModel, 'findById', async () => customer);
+  t.mock.method(EmployeeModel, 'findById', id => query(String(id) === String(cp) ? { isActive: true, reportingTo: rm } : { isActive: true, role }));
+  t.mock.method(RoleModel, 'findById', () => query({ code: 'RM', isActive: true }));
+  t.mock.method(hierarchyService, 'canAccessResource', async () => true);
+  t.mock.method(CustomerDocumentModel, 'findOne', () => query(doc));
+  t.mock.method(CustomerDocumentModel, 'findOneAndUpdate', (_query, update) => { Object.assign(doc, update.$set); return Promise.resolve(doc); });
+  t.mock.method(CustomerActivityModel, 'create', async () => ({}));
+  await assert.rejects(() => customerDocumentService.verify(otherRm, String(customerId), String(docId), 'REJECTED', 'Blurry'), error => error.statusCode === 403);
+  await assert.rejects(() => customerDocumentService.verify(rm, String(customerId), String(docId), 'REJECTED', ''), error => error.statusCode === 400);
+  const result = await customerDocumentService.verify(rm, String(customerId), String(docId), 'REJECTED', 'Blurry image');
+  assert.equal(result.verificationStatus, 'REJECTED'); assert.equal(result.verificationRemark, 'Blurry image');
+});
+
+test('MIS only sees CP-submitted customers after every current required document is verified', async (t) => {
+  const { Types } = await import('mongoose');
+  const { EmployeeModel } = await import('../dist/modules/employees/models/employee.model.js');
+  const { RoleModel } = await import('../dist/modules/roles/models/role.model.js');
+  const { CustomerModel } = await import('../dist/modules/customers/models/customer.model.js');
+  const { CustomerDocumentModel } = await import('../dist/modules/customers/models/customer-document.model.js');
+  const { customerScope, assertCustomerAccess } = await import('../dist/modules/customers/services/customer-access.service.js');
+  const { hierarchyService } = await import('../dist/modules/employees/services/hierarchy.service.js');
+  const actor = new Types.ObjectId(), role = new Types.ObjectId(), cp = new Types.ObjectId(), approved = new Types.ObjectId(), held = new Types.ObjectId(), legacy = new Types.ObjectId();
+  const customers = [ { _id: approved, reviewCp: cp, reviewRequiredTypes: ['PAN', 'AADHAAR'], creatorId: cp }, { _id: held, reviewCp: cp, reviewRequiredTypes: ['PAN', 'AADHAAR'], creatorId: cp }, { _id: legacy, creatorId: actor } ];
+  const docs = [ {customer: approved, documentType:'PAN',verificationStatus:'VERIFIED'}, {customer: approved,documentType:'AADHAAR',verificationStatus:'VERIFIED'}, {customer:held,documentType:'PAN',verificationStatus:'REJECTED'}, {customer:held,documentType:'AADHAAR',verificationStatus:'VERIFIED'} ];
+  const query = value => ({ select() { return this; }, sort() { return this; }, async lean() { return value; } });
+  t.mock.method(EmployeeModel, 'findById', () => query({role}));
+  t.mock.method(RoleModel, 'findById', () => query({code:'MIS'}));
+  t.mock.method(CustomerModel, 'find', () => query(customers));
+  t.mock.method(CustomerModel, 'findById', async id => customers.find(customer => customer._id.equals(id)));
+  t.mock.method(CustomerDocumentModel, 'find', () => query(docs));
+  t.mock.method(hierarchyService, 'canAccessResource', async () => true);
+  assert.deepEqual((await customerScope(actor)).map(String), [String(approved), String(legacy)]);
+  await assert.rejects(() => assertCustomerAccess(actor, held, 'read'), error => error.statusCode === 404);
+  assert.equal((await assertCustomerAccess(actor, approved, 'read'))._id, approved);
+});
+
+test('new customers stay visible to their sales uplines until all required documents are verified', async (t) => {
+  const { Types } = await import('mongoose');
+  const { EmployeeModel } = await import('../dist/modules/employees/models/employee.model.js');
+  const { RoleModel } = await import('../dist/modules/roles/models/role.model.js');
+  const { CustomerModel } = await import('../dist/modules/customers/models/customer.model.js');
+  const { CustomerDocumentModel } = await import('../dist/modules/customers/models/customer-document.model.js');
+  const { LeadModel } = await import('../dist/modules/leads/models/lead.model.js');
+  const { hierarchyService } = await import('../dist/modules/employees/services/hierarchy.service.js');
+  const { customerService } = await import('../dist/modules/customers/services/customer.service.js');
+  const md = new Types.ObjectId(), head = new Types.ObjectId(), rm = new Types.ObjectId(), cp = new Types.ObjectId(), roleId = new Types.ObjectId();
+  const pending = new Types.ObjectId(), rejected = new Types.ObjectId(), approved = new Types.ObjectId(), missing = new Types.ObjectId(), outsider = new Types.ObjectId();
+  const customers = [pending,rejected,approved,missing,outsider].map(_id => ({ _id, reviewRequiredTypes: ['PAN','AADHAAR'] }));
+  const docs = [ {customer:pending,documentType:'PAN',verificationStatus:'PENDING'}, {customer:pending,documentType:'AADHAAR',verificationStatus:'VERIFIED'}, {customer:rejected,documentType:'PAN',verificationStatus:'REJECTED'}, {customer:approved,documentType:'PAN',verificationStatus:'VERIFIED'}, {customer:approved,documentType:'AADHAAR',verificationStatus:'VERIFIED'} ];
+  let role = 'RM';
+  const chain = value => ({ select() { return this; }, sort() { return this; }, async lean() { return value; } });
+  t.mock.method(EmployeeModel, 'findById', () => chain({ role: roleId, isActive: true }));
+  t.mock.method(RoleModel, 'findById', () => chain({ code: role, isActive: true, category:'PRIMARY' }));
+  t.mock.method(hierarchyService, 'getDownlineEmployeeIds', async () => [rm, cp]);
+  t.mock.method(LeadModel, 'find', () => ({ distinct: async () => [] }));
+  t.mock.method(CustomerModel, 'find', query => query.$or ? { distinct: async () => [pending,rejected,approved,missing] } : chain(query._id ? customers.filter(customer => query._id.$in.some(id => id.equals(customer._id))) : customers));
+  t.mock.method(CustomerDocumentModel, 'find', () => chain(docs));
+  const rows = await customerService.reviewQueue(rm);
+  assert.deepEqual(rows.map(row => String(row._id)), [String(pending),String(rejected),String(missing)]);
+  assert.equal(rows.find(row => row._id.equals(rejected)).reviewStatus,'REJECTED');
+  role = 'CP_HEAD'; assert.deepEqual((await customerService.reviewQueue(head)).map(row => String(row._id)), [String(pending),String(rejected),String(missing)]);
+  role = 'MD'; assert.ok((await customerService.reviewQueue(md)).some(row => row._id.equals(outsider)));
+  role = 'MIS';
+  assert.deepEqual((await customerService.reviewQueue(md)).map(row => String(row._id)), [String(approved)]);
+  docs.filter(doc => doc.customer.equals(approved)).forEach(doc => { doc.misVerificationStatus = 'VERIFIED'; });
+  assert.deepEqual(await customerService.reviewQueue(md), []);
+  role = 'CP'; await assert.rejects(() => customerService.reviewQueue(cp), error => error.statusCode === 403);
+});
+
+test('MIS reviews only RM-verified current documents and must explain pending issues', async (t) => {
+  const { Types } = await import('mongoose');
+  const { EmployeeModel } = await import('../dist/modules/employees/models/employee.model.js');
+  const { RoleModel } = await import('../dist/modules/roles/models/role.model.js');
+  const { CustomerModel } = await import('../dist/modules/customers/models/customer.model.js');
+  const { CustomerDocumentModel } = await import('../dist/modules/customers/models/customer-document.model.js');
+  const { CustomerActivityModel } = await import('../dist/modules/customers/models/customer-activity.model.js');
+  const { hierarchyService } = await import('../dist/modules/employees/services/hierarchy.service.js');
+  const { customerDocumentService } = await import('../dist/modules/customers/services/customer-document.service.js');
+  const { misVerifyDocumentSchema } = await import('../dist/modules/customers/validations/customer.validation.js');
+  const actor = new Types.ObjectId(), cp = new Types.ObjectId(), role = new Types.ObjectId(), customerId = new Types.ObjectId(), docId = new Types.ObjectId();
+  const customer = { _id: customerId, creatorId: cp, reviewCp: cp, reviewRequiredTypes: ['PAN'] };
+  const doc = { _id: docId, customer: customerId, documentType: 'PAN', verificationStatus: 'VERIFIED', misVerificationStatus: 'PENDING' };
+  let actorCode = 'MIS';
+  const query = value => ({ select() { return this; }, sort() { return this; }, async lean() { return value; }, then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); } });
+  t.mock.method(CustomerModel, 'findById', async () => customer);
+  t.mock.method(EmployeeModel, 'findById', () => query({role, isActive:true}));
+  t.mock.method(RoleModel, 'findById', () => query({code:actorCode, isActive:true}));
+  t.mock.method(hierarchyService, 'canAccessResource', async () => true);
+  t.mock.method(CustomerDocumentModel, 'find', () => query([doc]));
+  t.mock.method(CustomerDocumentModel, 'findOne', () => query(doc));
+  t.mock.method(CustomerDocumentModel, 'findOneAndUpdate', (_query, update) => { Object.assign(doc, update.$set); return Promise.resolve(doc); });
+  t.mock.method(CustomerActivityModel, 'create', async () => ({}));
+  assert.ok(misVerifyDocumentSchema.validate({status:'PENDING'}).error);
+  assert.equal(misVerifyDocumentSchema.validate({status:'PENDING',remark:'Blurry'}).error, undefined);
+  doc.verificationStatus = 'PENDING';
+  await assert.rejects(() => customerDocumentService.misVerify(actor, String(customerId), String(docId), 'VERIFIED'), error => error.statusCode === 404);
+  doc.verificationStatus = 'VERIFIED';
+  await assert.rejects(() => customerDocumentService.misVerify(actor, String(customerId), String(docId), 'PENDING', ''), error => error.statusCode === 400);
+  await customerDocumentService.misVerify(actor, String(customerId), String(docId), 'PENDING', 'Blurry');
+  assert.equal(doc.misVerificationRemark, 'Blurry'); assert.equal(doc.verificationStatus, 'VERIFIED');
+  await customerDocumentService.misVerify(actor, String(customerId), String(docId), 'VERIFIED');
+  assert.equal(doc.misVerificationStatus, 'VERIFIED'); assert.equal(doc.verificationStatus, 'VERIFIED');
+  actorCode = 'RM'; await assert.rejects(() => customerDocumentService.misVerify(actor, String(customerId), String(docId), 'VERIFIED'), error => error.statusCode === 403);
 });

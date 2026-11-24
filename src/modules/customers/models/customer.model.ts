@@ -2,6 +2,8 @@ import { Schema, model } from 'mongoose';
 
 const customerSchema = new Schema({
   cpEmployee: { type: Schema.Types.ObjectId, ref: 'Employee', index: true },
+  reviewCp: { type: Schema.Types.ObjectId, ref: 'Employee', index: true },
+  reviewRequiredTypes: { type: [String], default: undefined },
   cpConvertedAt: Date,
   cpConvertedBy: { type: Schema.Types.ObjectId, ref: 'Employee' },
   customerCode: { type: String, required: true, unique: true, uppercase: true, trim: true },
@@ -16,6 +18,12 @@ const customerSchema = new Schema({
   siteAddress: { type: String, required: true, trim: true, maxlength: 1000 },
   requiredCapacityKW: { type: Number, required: true, min: 0.1, max: 100000 },
   ratePerKW: { type: Number, required: true, min: 0, max: 100000000 },
+  rate: { type: Number, min: 0, max: 100000000 },
+  isFixedRate: { type: Boolean, default: false },
+  panelCount: { type: Number, min: 1 }, wattsPerPanel: { type: Number, min: 0 },
+  inverter: String, systemType: String, phase: String, category: String, inverterBattery: String, quotationRemark: String,
+  quotation: { type: Schema.Types.ObjectId, ref: 'Quotation' },
+
   paymentMode: { type: String, required: true, trim: true, maxlength: 100 },
   panelBrand: { type: String, required: true, trim: true, maxlength: 100 },
   panelTechnology: { type: String, required: true, trim: true, maxlength: 100 },

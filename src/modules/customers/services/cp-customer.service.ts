@@ -16,7 +16,7 @@ import { assertCpCustomerAccess } from './cp-customer-access.service.js';
 
 export const cpCustomerSchema = createLeadSchema.concat(convertLeadSchema)
   .fork(['requiredCapacityKW', 'ratePerKW', 'paymentMode', 'panelBrand', 'panelTechnology'], field => field.required())
-  .keys({ requiredCapacityKW: Joi.number().min(0.1).max(100000).required(), confirmed: Joi.boolean().valid(true).strict().required() });
+  .keys({ documentUploadIds: Joi.array().items(Joi.string().hex().length(24).required()).length(4).unique().required(), requiredCapacityKW: Joi.number().min(0.1).max(100000).required(), confirmed: Joi.boolean().valid(true).strict().required() });
 interface ConversionInput {
   customerName: string; mobileNumber: string; alternateNumber?: string; branch: string; state: string; district: string;
   blockOrTehsil?: string; siteAddress: string; requiredCapacityKW: number; ratePerKW: number; paymentMode: string;

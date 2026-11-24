@@ -22,3 +22,5 @@ export const assign = handler('Lead assigned successfully', (req) => leadService
 export const history = handler('Lead status history fetched successfully', (req) => leadService.history(actorId(req), req.params.leadId as string));
 export const followUps = handler('Follow-ups fetched successfully', (req) => leadService.followUps(actorId(req), req.res!.locals.validatedQuery, false, req.res!.locals.validatedQuery));
 export const overdueFollowUps = handler('Overdue follow-ups fetched successfully', (req) => leadService.followUps(actorId(req), req.res!.locals.validatedQuery, true, req.res!.locals.validatedQuery));
+
+export const assignmentOptions = handler('Lead assignment options', (req) => leadService.assignmentOptions(actorId(req), req.params.leadId as string));

@@ -5,7 +5,7 @@ const uploadSchema = new Schema({
   lead: { type: Schema.Types.ObjectId, ref: 'Lead', index: true },
   cpEmployee: { type: Schema.Types.ObjectId, ref: 'Employee', index: true },
   owner: { type: Schema.Types.ObjectId, ref: 'Employee', required: true, index: true },
-  documentType: { type: String, required: true, enum: ['PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK'] },
+  documentType: { type: String, required: true, enum: ['PAN', 'AADHAAR', 'ELECTRICITY_BILL', 'BANK_PASSBOOK', 'GEO_TAG_PHOTO'] },
   fileName: { type: String, required: true, trim: true, maxlength: 180 },
   key: { type: String, required: true, unique: true },
   contentType: { type: String, required: true, enum: ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'] },

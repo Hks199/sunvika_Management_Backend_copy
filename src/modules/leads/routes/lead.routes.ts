@@ -11,6 +11,7 @@ leadRouter.post('/', requirePermission('leads.create'), validateBody(createLeadS
 leadRouter.get('/follow-ups/overdue', requirePermission('leads.read'), validateQuery(followUpQuerySchema), controller.overdueFollowUps);
 leadRouter.get('/follow-ups', requirePermission('leads.read'), validateQuery(followUpQuerySchema), controller.followUps);
 leadRouter.get('/', requirePermission('leads.read'), validateQuery(leadListQuerySchema), controller.list);
+leadRouter.get('/:leadId/assignment-options', requirePermission('leads.assign'), controller.assignmentOptions);
 leadRouter.get('/:leadId/history', requirePermission('leads.read'), controller.history);
 leadRouter.get('/:leadId', requirePermission('leads.read'), controller.get);
 leadRouter.patch('/:leadId', requirePermission('leads.update'), validateBody(updateLeadSchema), controller.update);
