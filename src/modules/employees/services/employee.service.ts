@@ -1,3 +1,4 @@
+import { hashPassword } from '../../../utils/password.util.js';
 import { hasOrganizationVisibility } from './visibility-policy.js';
 import { employeeListFilter, type EmployeeListFilters } from './employee-list-filter.service.js';
 import { EMPLOYEE_DETAIL_REFERENCES } from './employee-reference-populations.js';
@@ -17,7 +18,7 @@ import { geographyService } from '../../geography/services/geography.service.js'
 
 interface EmployeeInput {
   employeeCode?: string;
-  firstName: string; middleName?: string; lastName: string; email: string; mobileNumber: string;
+  firstName: string; middleName?: string; lastName: string; email?: string; password?: string; mobileNumber: string;
   address: { addressLine: string; state: string; district: string; city?: string; pincode?: string };
   roleCode: string; branch?: string; profileImageUploadId?: string;
 }
@@ -100,6 +101,11 @@ export const employeeService = {
     const employee = await withHierarchyLock(async () => {
     await geographyService.validateEmployeePlacement(input.address.state, input.address.district, input.branch);
     const { creatorRole, targetRole } = await canCreateRole(actorId, input.roleCode);
+    const directCp = creatorRole.code === 'RM' && targetRole.code === 'CP' && Boolean(input.password);
+    if (input.password && !directCp) throw new AppError('Only an RM creating a channel partner can set an initial password', 403);
+    if (!input.email && !directCp) throw new AppError('Email is required unless an RM sets a channel partner password', 400);
+    if (directCp && !input.employeeCode) throw new AppError('A user ID is required for direct channel partner creation', 400);
+    const passwordHash = directCp ? await hashPassword(input.password!) : undefined;
     const isAdminHead = targetRole.category === 'ADMIN_HEAD';
     const isHierarchyRoot = isAdminHead || targetRole.code === 'MD';
     const reportingTo = isHierarchyRoot ? undefined : actorId;
@@ -119,7 +125,8 @@ export const employeeService = {
       firstName: input.firstName,
       ...(input.middleName ? { middleName: input.middleName } : {}),
       lastName: input.lastName,
-      email: input.email.toLowerCase(),
+      ...(input.email ? { email: input.email.toLowerCase() } : {}),
+      ...(passwordHash ? { passwordHash } : {}),
       mobileNumber: input.mobileNumber,
       address,
       role: targetRole._id,
@@ -128,7 +135,7 @@ export const employeeService = {
       ...(input.branch ? { branch: validateObjectId(input.branch, 'branch ID') } : {}),
       ...(imageUpload ? { profileImage: { key: imageUpload.key } } : {}),
       isActive: true,
-      isVerified: false,
+      isVerified: directCp,
       createdBy: actorId
     }).catch(async (error: unknown) => {
       if (claimedUploadId) await profileImageService.releaseUpload(claimedUploadId);
@@ -136,8 +143,9 @@ export const employeeService = {
     });
     if (claimedUploadId) await profileImageService.completeUpload(claimedUploadId!, employee._id!);
     });
-    const invitationSent = await authService.createInvitation(employee._id.toString(), actorId.toString());
-    return { employee: toPublicEmployee(employee.toObject() as unknown as Record<string, unknown>), invitationSent };
+    const credentialsCreated = Boolean(input.password);
+    const invitationSent = credentialsCreated ? false : await authService.createInvitation(employee._id.toString(), actorId.toString());
+    return { employee: toPublicEmployee(employee.toObject() as unknown as Record<string, unknown>), invitationSent, credentialsCreated };
   },
 
   async listAccessible(actorId: Types.ObjectId, pagination: PaginationInput, directory: EmployeeDirectory = 'all', filters: EmployeeListFilters = {}) {

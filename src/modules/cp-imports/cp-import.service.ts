@@ -12,7 +12,7 @@ import { BranchModel } from '../geography/models/branch.model.js';
 import { geographyService } from '../geography/services/geography.service.js';
 import { canCreateRole,withHierarchyLock } from '../employees/services/employee.service.js';
 import { createEmployeeSchema } from '../employees/validations/employee.validation.js';
-import { authService } from '../auth/services/auth.service.js';
+import { hashPassword } from '../../utils/password.util.js';
 import { CpImportModel } from './cp-import.model.js';
 import { parseCpImport } from './cp-import.excel.js';
 const normalize=(value:string)=>value.trim().toLowerCase();
@@ -50,7 +50,7 @@ export const cpImportService={
     if(managerId&&!defaultManager)throw new AppError('Choose an active default RM in your permitted team',403);
     const parsed=await parseCpImport(bytes);
     const [states,districts,branches]=await Promise.all([StateModel.find({isActive:true}).select('_id name').lean(),DistrictModel.find({isActive:true}).select('_id name state').lean(),BranchModel.find({isActive:true}).select('_id name code state district').lean()]);
-    const rows=parsed.map(row=>{
+    const rows=await Promise.all(parsed.map(async row=>{
       const f=row.fields,errors:string[]=[];
       const rmCode=normalize(f['Reporting RM employee code'] ?? '');
       const reportingManager=rmCode?available.find(rm=>normalize(rm.employeeCode)===rmCode):defaultManager;
@@ -62,20 +62,24 @@ export const cpImportService={
       const branchText=normalize(f.Branch!);
       const matches=branchText&&district?branches.filter(item=>item.state.equals(state!._id)&&item.district.equals(district._id)&&(normalize(item.name)===branchText||normalize(item.code)===branchText)):[];
       if(branchText&&matches.length!==1)errors.push('Branch is missing or ambiguous in this district; use its unique branch code');
-      const input={roleCode:'CP',...(f['CP code']?{employeeCode:f['CP code'].toUpperCase()}:{}),firstName:f['First name'],lastName:f['Last name'],...(f['Middle name']?{middleName:f['Middle name']}:{}),email:f.Email!.toLowerCase(),mobileNumber:f['Mobile number'],address:{addressLine:f.Address,state:String(state?._id ?? ''),district:String(district?._id ?? ''),...(f.City?{city:f.City}:{}),...(f.Pincode?{pincode:f.Pincode}:{})},...(matches[0]?{branch:String(matches[0]._id)}:{})};
+      const input={roleCode:'CP',...(f['CP code']?{employeeCode:f['CP code'].toUpperCase()}:{}),firstName:f['First name'],lastName:f['Last name'],...(f['Middle name']?{middleName:f['Middle name']}:{}),...(f.Email?{email:f.Email.toLowerCase()}:{}),password:f.Password,mobileNumber:f['Mobile number'],address:{addressLine:f.Address,state:String(state?._id ?? ''),district:String(district?._id ?? ''),...(f.City?{city:f.City}:{}),...(f.Pincode?{pincode:f.Pincode}:{})},...(matches[0]?{branch:String(matches[0]._id)}:{})};
       const validation=createEmployeeSchema.validate(input,{abortEarly:false});
-      if(validation.error)errors.push(...validation.error.details.map(item=>item.message));
-      return {rowNumber:row.rowNumber,manager:reportingManager?._id,managerName:reportingManager?[reportingManager.firstName,reportingManager.lastName].filter(Boolean).join(' '):'',managerCode:reportingManager?.employeeCode ?? '',fields:f,payload:validation.value,errors,status:'PENDING' as const};
-    });
+      if(!f['CP code'])errors.push('CP code is required as the login user ID');
+      if(validation.error)errors.push(...validation.error.details.map(item=>item.path[0]==='password'?'Password must be 12?72 UTF-8 bytes and include uppercase, lowercase and a number':item.message));
+      const {Password:_password,...safeFields}=f;
+      const {password,...safePayload}=validation.value;
+      const passwordHash=!validation.error&&password?await hashPassword(password):undefined;
+      return {rowNumber:row.rowNumber,manager:reportingManager?._id,managerName:reportingManager?[reportingManager.firstName,reportingManager.lastName].filter(Boolean).join(' '):'',managerCode:reportingManager?.employeeCode ?? '',fields:safeFields,payload:{...safePayload,...(passwordHash?{passwordHash}:{})},errors,status:'PENDING' as const};
+    }));
     for(const key of ['email','mobileNumber','employeeCode'] as const){
       const seen=new Map<string,number[]>();
       rows.forEach((row,index)=>{const value=row.payload?.[key];if(value)seen.set(value,[...(seen.get(value)??[]),index]);});
       for(const indexes of seen.values())if(indexes.length>1)for(const index of indexes)rows[index]!.errors.push(`Duplicate ${key} within this workbook`);
     }
-    const existing=await EmployeeModel.find({$or:[{isActive:true,email:{$in:rows.map(row=>row.payload.email)}},{isActive:true,mobileNumber:{$in:rows.map(row=>row.payload.mobileNumber)}},{employeeCode:{$in:rows.map(row=>row.payload.employeeCode).filter(Boolean)}}]}).select('email mobileNumber employeeCode isActive').lean();
+    const existing=await EmployeeModel.find({$or:[{isActive:true,email:{$in:rows.map(row=>row.payload.email).filter(Boolean)}},{isActive:true,mobileNumber:{$in:rows.map(row=>row.payload.mobileNumber)}},{employeeCode:{$in:rows.map(row=>row.payload.employeeCode).filter(Boolean)}}]}).select('email mobileNumber employeeCode isActive').lean();
     const customers=await CustomerModel.find({mobileNumber:{$in:rows.map(row=>row.payload.mobileNumber)}}).select('mobileNumber').lean();
     for(const row of rows)if(customers.some(customer=>customer.mobileNumber===row.payload.mobileNumber))row.errors.push('Customer already exists with this mobile number. Use Convert to CP on the customer record to preserve history.');
-    for(const row of rows){if(existing.some(item=>item.isActive&&item.email===row.payload.email))row.errors.push('Email already registered');if(existing.some(item=>item.isActive&&item.mobileNumber===row.payload.mobileNumber))row.errors.push('Mobile number already registered');if(row.payload.employeeCode&&existing.some(item=>item.employeeCode===row.payload.employeeCode))row.errors.push('CP code already registered');}
+    for(const row of rows){if(row.payload.email&&existing.some(item=>item.isActive&&item.email===row.payload.email))row.errors.push('Email already registered');if(existing.some(item=>item.isActive&&item.mobileNumber===row.payload.mobileNumber))row.errors.push('Mobile number already registered');if(row.payload.employeeCode&&existing.some(item=>item.employeeCode===row.payload.employeeCode))row.errors.push('CP code already registered');}
     const job=await CpImportModel.create({owner:actorId,...(defaultManager?{manager:defaultManager._id}:{}),fileName,state:rows.some(row=>row.errors.length)?'INVALID':'PREVIEW',rows:rows.map(({errors,...row})=>({...row,validationErrors:errors}))});return publicJob(job);
   },
   async get(actorId:Types.ObjectId,id:string){return publicJob(await authorizedJob(actorId,id));},
@@ -105,19 +109,19 @@ export async function processCpImport(){
           if(!await CpImportModel.exists({_id:job._id,lockOwner:owner}))throw new AppError('Import processing changed',409);
           const key=`${job._id}:${row.rowNumber}`;
           const existing=await EmployeeModel.findOne({cpImportKey:key}).select('_id employeeCode').lean();if(existing)return existing;
-          const payload=createEmployeeSchema.validate(row.payload);if(payload.error)throw new AppError('Row validation failed; correct the workbook and upload again',400);
-          const input=payload.value as {employeeCode?:string;firstName:string;middleName?:string;lastName:string;email:string;mobileNumber:string;address:{state:string;district:string;addressLine:string;city?:string;pincode?:string};branch?:string};
+          const {passwordHash,...savedPayload}=row.payload as {passwordHash?:string;[key:string]:unknown};
+          if(!passwordHash)throw new AppError('This import uses an old template; upload the latest template with CP passwords',400);
+          const payload=createEmployeeSchema.validate({...savedPayload,password:'ValidatedPassword123'});if(payload.error)throw new AppError('Row validation failed; correct the workbook and upload again',400);
+          const input=payload.value as {employeeCode?:string;firstName:string;middleName?:string;lastName:string;email?:string;mobileNumber:string;address:{state:string;district:string;addressLine:string;city?:string;pincode?:string};branch?:string};
           if(await CustomerModel.exists({mobileNumber:input.mobileNumber}))throw new AppError('Customer already exists with this mobile number. Use Convert to CP on the customer record to preserve history.',409);
           await geographyService.validateEmployeePlacement(input.address.state,input.address.district,input.branch);
           const cpRole=await RoleModel.findOne({code:'CP',isActive:true}).select('_id').lean();if(!cpRole)throw new AppError('CP role is unavailable',400);
-          return EmployeeModel.create({firstName:input.firstName,lastName:input.lastName,email:input.email,mobileNumber:input.mobileNumber,...(input.middleName?{middleName:input.middleName}:{}),employeeCode:input.employeeCode ?? `CP-${job._id}-${row.rowNumber}`,cpImportKey:key,
+          return EmployeeModel.create({firstName:input.firstName,lastName:input.lastName,...(input.email?{email:input.email}:{}),passwordHash,mobileNumber:input.mobileNumber,...(input.middleName?{middleName:input.middleName}:{}),employeeCode:input.employeeCode ?? `CP-${job._id}-${row.rowNumber}`,cpImportKey:key,
             address:{...input.address,state:new Types.ObjectId(input.address.state),district:new Types.ObjectId(input.address.district)},
-            ...(input.branch?{branch:new Types.ObjectId(input.branch)}:{}),role:cpRole._id,reportingTo:rm._id,hierarchyPath:[...rm.hierarchyPath,rm._id],createdBy:job.owner,isActive:true,isVerified:false});
+            ...(input.branch?{branch:new Types.ObjectId(input.branch)}:{}),role:cpRole._id,reportingTo:rm._id,hierarchyPath:[...rm.hierarchyPath,rm._id],createdBy:job.owner,isActive:true,isVerified:true});
         });
-        const result=await CpImportModel.updateOne({_id:job._id,lockOwner:owner},{$set:{[`rows.${index}.status`]:'CREATED',[`rows.${index}.employee`]:employee._id,[`rows.${index}.error`]:'Invitation not sent; use Resend invitation if needed'}});
+        const result=await CpImportModel.updateOne({_id:job._id,lockOwner:owner},{$set:{[`rows.${index}.status`]:'CREATED',[`rows.${index}.employee`]:employee._id,[`rows.${index}.error`]:'Account ready for user ID and password login'}});
         if(!result.matchedCount)return true;
-        let sent=false;try{sent=await authService.createInvitation(String(employee._id),String(job.owner));}catch{}
-        await CpImportModel.updateOne({_id:job._id,lockOwner:owner},{$set:{[`rows.${index}.invitationSent`]:sent,[`rows.${index}.error`]:sent?'':'Account created. Invitation was not sent; use Resend invitation.'}});
       }catch(error){
         const message=(error as {code?:number}).code===11000?'Email, mobile number or CP code was registered after preview; no duplicate account was created':error instanceof AppError?error.message:'Row could not be created. Refresh and check before retrying.';
         await CpImportModel.updateOne({_id:job._id,lockOwner:owner,[`rows.${index}.status`]:'PENDING'},{$set:{[`rows.${index}.status`]:'FAILED',[`rows.${index}.error`]:message}});

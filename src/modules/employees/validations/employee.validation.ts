@@ -13,13 +13,14 @@ export const createEmployeeSchema = Joi.object({
   firstName: Joi.string().trim().min(1).max(80).required(),
   middleName: Joi.string().trim().max(80).allow(''),
   lastName: Joi.string().trim().min(1).max(80).required(),
-  email: Joi.string().email().max(254).lowercase().trim().required(),
+  email: Joi.when('roleCode', { is: 'CP', then: Joi.string().email().max(254).lowercase().trim().optional(), otherwise: Joi.string().email().max(254).lowercase().trim().required() }),
+  password: Joi.when('roleCode', { is: 'CP', then: Joi.string().min(12).max(72, 'utf8').pattern(/[a-z]/).pattern(/[A-Z]/).pattern(/[0-9]/).optional(), otherwise: Joi.forbidden() }),
   mobileNumber: Joi.string().pattern(/^\+?[1-9]\d{7,14}$/).required(),
   address: addressSchema,
   roleCode: Joi.string().uppercase().pattern(/^[A-Z][A-Z0-9_]{1,39}$/).required(),
   branch: Joi.string().hex().length(24),
   profileImageUploadId: Joi.string().hex().length(24)
-}).required();
+}).custom((value, helpers) => value.roleCode === 'CP' && !value.email && !value.password ? helpers.error('any.invalid') : value).required();
 
 export const updateEmployeeSchema = Joi.object({
   firstName: Joi.string().trim().min(1).max(80),

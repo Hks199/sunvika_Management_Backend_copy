@@ -15,7 +15,7 @@ import { RefreshTokenModel } from '../models/refresh-token.model.js';
 import { RoleModel } from '../../roles/models/role.model.js';
 import { PermissionModel } from '../../roles/models/permission.model.js';
 
-const GENERIC_AUTH_ERROR = 'Invalid email or password';
+const GENERIC_AUTH_ERROR = 'Invalid user ID, email or password';
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCK_MINUTES = 15;
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
@@ -29,7 +29,7 @@ interface PublicEmployee {
   firstName: string;
   middleName?: string | null;
   lastName: string;
-  email: string;
+  email?: string | null;
   mobileNumber: string;
   role: { id: string; code: string; name: string; level: number; category: string; permissions: string[] };
   isActive: boolean;
@@ -42,7 +42,7 @@ async function publicEmployee(employee: {
   firstName: string;
   middleName?: string | null;
   lastName: string;
-  email: string;
+  email?: string | null;
   mobileNumber: string;
   role: Types.ObjectId;
   isActive: boolean;
@@ -57,7 +57,7 @@ async function publicEmployee(employee: {
     firstName: employee.firstName,
     ...(employee.middleName ? { middleName: employee.middleName } : {}),
     lastName: employee.lastName,
-    email: employee.email,
+    ...(employee.email ? { email: employee.email } : {}),
     mobileNumber: employee.mobileNumber,
     role: { id: employee.role.toString(), code: role.code, name: role.name, level: role.level, category: role.category, permissions: [...new Set([...permissions.map(({ code }) => code), ...(role.code === 'MIS' ? MIS_READ_PERMISSIONS : [])])] },
     isActive: employee.isActive,
@@ -90,8 +90,9 @@ async function issueRefreshToken(employeeId: Types.ObjectId, familyId: string, m
 }
 
 export const authService = {
-  async login(email: string, password: string, metadata: RequestMetadata) {
-    const employee = await EmployeeModel.findOne({ email: email.toLowerCase() })
+  async login(identifier: string, password: string, metadata: RequestMetadata) {
+    const normalized = identifier.trim();
+    const employee = await EmployeeModel.findOne(normalized.includes('@') ? { email: normalized.toLowerCase() } : { employeeCode: normalized.toUpperCase() })
       .select('+passwordHash +failedLoginAttempts +lockedUntil');
     const now = new Date();
     if (!employee || !employee.isActive || !employee.isVerified || !employee.passwordHash) {
@@ -183,6 +184,7 @@ export const authService = {
   async createInvitation(employeeId: string, creatorId: string): Promise<boolean> {
     const employee = await EmployeeModel.findById(employeeId);
     if (!employee || !employee.isActive) throw new AppError('Employee is unavailable', 404);
+    if (!employee.email) throw new AppError('This account has no email address for invitations', 400);
     const rawToken = createOpaqueToken();
     await InvitationModel.updateMany({ employee: employee._id, usedAt: null, revokedAt: null }, { $set: { revokedAt: new Date() } });
     const invitation = await InvitationModel.create({ employee: employee._id, tokenHash: hashToken(rawToken), expiresAt: new Date(Date.now() + INVITATION_TTL_MS), createdBy: creatorId });
@@ -213,7 +215,7 @@ export const authService = {
 
   async requestPasswordReset(email: string): Promise<void> {
     const employee = await EmployeeModel.findOne({ email: email.toLowerCase(), isActive: true });
-    if (!employee) return;
+    if (!employee?.email) return;
     const rawToken = createOpaqueToken();
     await PasswordResetTokenModel.updateMany({ employee: employee._id, usedAt: null, revokedAt: null }, { $set: { revokedAt: new Date() } });
     await PasswordResetTokenModel.create({ employee: employee._id, tokenHash: hashToken(rawToken), expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS) });

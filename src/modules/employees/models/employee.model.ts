@@ -7,7 +7,7 @@ const employeeSchema = new Schema({
   firstName: { type: String, required: true, trim: true, maxlength: 80 },
   middleName: { type: String, trim: true, maxlength: 80 },
   lastName: { type: String, required: true, trim: true, maxlength: 80 },
-  email: { type: String, required: true, lowercase: true, trim: true },
+  email: { type: String, lowercase: true, trim: true },
   mobileNumber: { type: String, required: true, trim: true },
   profileImage: { key: { type: String }, url: { type: String } },
   address: {
@@ -34,7 +34,7 @@ employeeSchema.index({ cpImportKey: 1 }, { unique: true, partialFilterExpression
 employeeSchema.index({ hierarchyPath: 1 });
 employeeSchema.index({ reportingTo: 1, isActive: 1 });
 employeeSchema.index({ role: 1, isActive: 1 });
-employeeSchema.index({ email: 1 }, { unique: true, partialFilterExpression: { isActive: true } });
+employeeSchema.index({ email: 1, isActive: 1 }, { name: 'active_email_unique_v2', unique: true, partialFilterExpression: { isActive: true, email: { $type: 'string' } } });
 employeeSchema.index({ mobileNumber: 1 }, { unique: true, partialFilterExpression: { isActive: true } });
 
 export type EmployeeDocument = InferSchemaType<typeof employeeSchema>;

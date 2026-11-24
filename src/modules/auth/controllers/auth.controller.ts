@@ -23,7 +23,7 @@ function metadata(req: Parameters<RequestHandler>[0]) {
 
 export const login: RequestHandler = async (req, res, next) => {
   try {
-    const result = await authService.login(req.body.email as string, req.body.password as string, metadata(req));
+    const result = await authService.login((req.body.identifier ?? req.body.email) as string, req.body.password as string, metadata(req));
     res.cookie(COOKIE_NAME, result.refreshToken, cookieOptions());
     return sendSuccess(res, 'Signed in successfully', { accessToken: result.accessToken, employee: result.employee });
   } catch (error) { return next(error); }
