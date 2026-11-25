@@ -1651,11 +1651,11 @@ test('bulk calling workbook splits 101 entries into 50, 50 and 1, retaining head
   const extra=workbook.addWorksheet('Extra');extra.addRow(['Name']);extra.addRow(['Candidate']);
   await assert.rejects(splitCallingWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()),async()=>{}),/exactly one worksheet/);
 });
-test('daily distribution starts at precisely 09:30 IST independently of server timezone', async () => {
+test('daily distribution is available all day and uses the India calendar day', async () => {
   const { dailyDistributionTime } = await import('../dist/modules/calling-lists/calling-bulk.service.js');
-  assert.deepEqual(dailyDistributionTime(new Date('2026-11-13T03:59:59Z')),{day:'2026-11-13',due:false});
+  assert.deepEqual(dailyDistributionTime(new Date('2026-11-13T03:59:59Z')),{day:'2026-11-13',due:true});
   assert.deepEqual(dailyDistributionTime(new Date('2026-11-13T04:00:00Z')),{day:'2026-11-13',due:true});
-  assert.deepEqual(dailyDistributionTime(new Date('2026-11-13T18:30:00Z')),{day:'2026-11-14',due:false});
+  assert.deepEqual(dailyDistributionTime(new Date('2026-11-13T18:30:00Z')),{day:'2026-11-14',due:true});
 });
 
 test('daily allocation settings reject the retired quantity setting', async () => {
@@ -2165,4 +2165,49 @@ test('bulk CP preview protects passwords and accepts no email', async t => {
   assert.equal(await comparePassword('StrongPassword123',saved.rows[0].payload.passwordHash),true);
   assert.equal(JSON.stringify(result).includes('StrongPassword123'),false);
   assert.equal(JSON.stringify(result).includes(saved.rows[0].payload.passwordHash),false);
+});
+
+test('calling allocation availability is RM-only and distribution selects available RMs all day', async t=>{
+  const {Types}=await import('mongoose');
+  const {callingBulkService,distributeDailyCallingSheets}=await import('../dist/modules/calling-lists/calling-bulk.service.js');
+  const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');
+  const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');
+  const {CallingDistributionSettingsModel,CallingAllocationModel}=await import('../dist/modules/calling-lists/calling-bulk.model.js');
+  const {CallingListModel}=await import('../dist/modules/calling-lists/calling-list.model.js');
+  const actor=new Types.ObjectId(),role=new Types.ObjectId();let isRM=true,active=false,selected,checks=0;
+  const query=value=>({select(){return this;},sort(){return this;},lean:async()=>value});
+  t.mock.method(EmployeeModel,'findOne',()=>query({role,callingAllocationActive:active}));
+  t.mock.method(EmployeeModel,'updateOne',async(filter,update)=>{assert.equal(String(filter._id),String(actor));active=update.$set.callingAllocationActive;return {matchedCount:1};});
+  t.mock.method(RoleModel,'findOne',filter=>query(filter.code==='RM'?(isRM?{_id:role}:null):{_id:role}));
+  t.mock.method(EmployeeModel,'find',filter=>{selected=filter;return query([{_id:actor,callingLanguages:['Hindi']}]);});
+  t.mock.method(CallingDistributionSettingsModel,'findOne',()=>query({enabled:true,skipUnfinished:true}));
+  t.mock.method(CallingAllocationModel,'exists',async()=>{checks++;return true;});
+  t.mock.method(CallingListModel,'findOne',()=>{throw new Error('Already allocated RM must not receive a second sheet');});
+  assert.deepEqual(await callingBulkService.availability(actor),{active:false,languages:[]});
+  assert.deepEqual(await callingBulkService.availability(actor,true),{active:true,languages:[]});
+  assert.deepEqual(await callingBulkService.availability(actor,false),{active:false,languages:[]});
+  isRM=false;await assert.rejects(callingBulkService.availability(actor,true),e=>e.statusCode===403);
+  isRM=true;await distributeDailyCallingSheets(new Date('2026-11-13T00:00:00Z'));
+  assert.equal(selected.callingAllocationActive,true);assert.equal(checks,1);
+});
+
+test('calling sheets are selected only for each available RM language and missing matches do not block others',async t=>{
+ const {Types}=await import('mongoose');
+ const {distributeDailyCallingSheets,callingBulkService}=await import('../dist/modules/calling-lists/calling-bulk.service.js');
+ const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');
+ const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');
+ const {CallingDistributionSettingsModel,CallingAllocationModel,CallingLanguageOptionsModel}=await import('../dist/modules/calling-lists/calling-bulk.model.js');
+ const {CallingListModel}=await import('../dist/modules/calling-lists/calling-list.model.js');
+ const role=new Types.ObjectId(),actor=new Types.ObjectId(),other=new Types.ObjectId();const seen=[];
+ const query=value=>({select(){return this;},sort(){return this;},lean:async()=>value});
+ t.mock.method(EmployeeModel,'findOne',()=>query({role,callingAllocationActive:true,callingLanguages:['Hindi']}));
+ t.mock.method(RoleModel,'findOne',()=>query({_id:role}));
+ t.mock.method(EmployeeModel,'find',()=>query([{_id:actor,callingLanguages:['Hindi']},{_id:other,callingLanguages:['Tamil']}]));
+ t.mock.method(CallingDistributionSettingsModel,'findOne',()=>query({enabled:true}));
+ t.mock.method(CallingLanguageOptionsModel,'findOne',()=>query({languages:['Hindi','Tamil']}));
+ t.mock.method(CallingAllocationModel,'exists',async()=>false);
+ t.mock.method(CallingListModel,'findOne',filter=>{seen.push(filter.language.$in);return query(null);});
+ await distributeDailyCallingSheets(new Date('2026-11-13T00:00:00Z'));
+ assert.equal(seen.length,2);assert.ok(seen.some(x=>x[0]==='Hindi'));assert.ok(seen.some(x=>x[0]==='Tamil'));
+ await assert.rejects(callingBulkService.availability(actor,undefined,['Unconfigured']),e=>e.statusCode===400);
 });

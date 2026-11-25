@@ -3,6 +3,7 @@ import { AppError } from '../../utils/app-error.util.js';
 import { EmployeeModel } from '../employees/models/employee.model.js';
 import { RoleModel } from '../roles/models/role.model.js';
 import { CallingListModel, CallingCandidateModel } from './calling-list.model.js';
+import { indiaDay } from '../calling-reports/calling-report.policy.js';
 import { CallingAllocationModel } from './calling-bulk.model.js';
 import { callingListStorage } from './calling-list.storage.js';
 import { parseCallingWorkbook } from './calling-list.excel.js';
@@ -14,8 +15,14 @@ export async function assignStoredCallingSheet(listId: Types.ObjectId, rmId: Typ
   if (parsed.rows.length !== list.rowCount || JSON.stringify(parsed.headers) !== JSON.stringify(list.headers)) throw new AppError('Stored sheet does not match its upload metadata', 409);
   await mongoose.connection.transaction(async session => {
     const role = await RoleModel.findOne({ code: 'RM', isActive: true }).session(session);
-    if (!role || !await EmployeeModel.exists({ _id: rmId, role: role._id, isActive: true }).session(session)) throw new AppError('Select an active RM', 400);
-    const claimed = await CallingListModel.updateOne({ _id: listId, state: 'READY', candidateStorage: 'S3', assignedTo: null, busy: false }, {
+    if (!role) throw new AppError('Select an active RM', 400);
+    if (automatic) {
+      if (indiaDay(new Date()) !== automatic.day) throw new AppError('Allocation day changed; retry', 409);
+      if (!list.language) throw new AppError('Sheet language is missing', 409);
+      const available = await EmployeeModel.updateOne({ _id: rmId, role: role._id, isActive: true, callingAllocationActive: true, callingLanguages: list.language }, { $inc: { callingAllocationRevision: 1 } }, { session });
+      if (!available.matchedCount) throw new AppError('RM is not available for automatic allocation', 409);
+    } else if (!await EmployeeModel.exists({ _id: rmId, role: role._id, isActive: true }).session(session)) throw new AppError('Select an active RM', 400);
+    const claimed = await CallingListModel.updateOne({ _id: listId, state: 'READY', candidateStorage: 'S3', assignedTo: null, busy: false, ...(automatic ? {language:list.language} : {}) }, {
       $set: { candidateStorage: 'DATABASE', assignedTo: rmId, assignedAt: new Date(), assignmentSource: automatic ? 'AUTO' : 'MANUAL', ...(actorId ? { assignedBy: actorId } : {}) }
     }, { session });
     if (!claimed.modifiedCount) throw new AppError('Another request assigned this sheet; refresh and retry', 409);

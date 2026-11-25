@@ -1,6 +1,7 @@
 import { Schema, model } from 'mongoose';
 const batchSchema = new Schema({
   title: { type: String, required: true, maxlength: 140 }, fileName: { type: String, required: true, maxlength: 180 },
+  language: { type: String, trim: true, maxlength: 60 },
   uploadedBy: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   bucket: { type: String, required: true, select: false }, key: { type: String, required: true, select: false }, size: { type: Number, required: true },
   state: { type: String, enum: ['RESERVED','UPLOADING','QUEUED','PROCESSING','READY','FAILED'], default: 'RESERVED' },
@@ -22,3 +23,6 @@ const allocationSchema = new Schema({
 allocationSchema.index({ day: 1, rm: 1, slot: 1 }, { unique: true });
 allocationSchema.index({ list: 1 }, { unique: true });
 export const CallingAllocationModel = model('CallingAllocation', allocationSchema);
+
+const languageOptionsSchema = new Schema({ key: { type: String, unique: true, required: true }, languages: [{ type: String, trim: true, maxlength: 60 }] }, { timestamps: true, strict: 'throw' });
+export const CallingLanguageOptionsModel = model('CallingLanguageOptions', languageOptionsSchema);

@@ -6,7 +6,7 @@ import { logger } from '../../services/logger.service.js';
 import { EmployeeModel } from '../employees/models/employee.model.js';
 import { RoleModel } from '../roles/models/role.model.js';
 import { indiaDay } from '../calling-reports/calling-report.policy.js';
-import { CallingBatchModel, CallingAllocationModel, CallingDistributionSettingsModel } from './calling-bulk.model.js';
+import { CallingBatchModel, CallingAllocationModel, CallingDistributionSettingsModel, CallingLanguageOptionsModel } from './calling-bulk.model.js';
 import { CallingListModel, CallingCandidateModel } from './calling-list.model.js';
 import { callingListStorage } from './calling-list.storage.js';
 import { buildCallingSheet, splitCallingWorkbook } from './calling-bulk.excel.js';
@@ -17,14 +17,28 @@ export async function assertCallingBatchAdministrator(actorId: Types.ObjectId) {
   const role = employee ? await RoleModel.findOne({ _id: employee.role, isActive: true }).select('code').lean() : null;
   if (!role || !['MD','MIS'].includes(role.code)) throw new AppError('Only MD and MIS can manage upload batches and daily distribution', 403);
 }
-const publicBatch = 'title fileName uploadedBy state size candidateCount sheetCount error createdAt completedAt';
+const publicBatch = 'language title fileName uploadedBy state size candidateCount sheetCount error createdAt completedAt';
 export function dailyDistributionTime(now: Date) {
-  const local = new Date(now.getTime() + 330 * 60_000);
-  return { day: indiaDay(now), due: local.getUTCHours() * 60 + local.getUTCMinutes() >= 570 };
+  return { day: indiaDay(now), due: true };
 }
 export const callingBulkService = {
-  async reserve(actorId: Types.ObjectId, input: { title: string; fileName: string; size: number }) {
+  async languages() { return (await CallingLanguageOptionsModel.findOne({key:'default'}).lean())?.languages ?? []; },
+  async saveLanguages(languages:string[]) { const saved=await CallingLanguageOptionsModel.findOneAndUpdate({key:'default'},{$set:{languages}},{upsert:true,new:true,runValidators:true});return saved.languages; },
+  async availability(actorId: Types.ObjectId, active?: boolean, languages?: string[]) {
+    const employee = await EmployeeModel.findOne({ _id: actorId, isActive: true }).select('role callingAllocationActive callingLanguages').lean();
+    const role = employee ? await RoleModel.findOne({ _id: employee.role, code: 'RM', isActive: true }).select('_id').lean() : null;
+    if (!role) throw new AppError('Only an active RM can change calling allocation availability', 403);
+    const allowedLanguages=languages ? await this.languages() : [];
+    if (languages && languages.some(language=>!(allowedLanguages.includes(language)))) throw new AppError('Select languages configured by MD',400);
+    if (active !== undefined || languages !== undefined) {
+      const result = await EmployeeModel.updateOne({ _id: actorId, role: role._id, isActive: true }, { $set: { ...(active !== undefined ? { callingAllocationActive: active } : {}), ...(languages !== undefined ? { callingLanguages: languages } : {}) } });
+      if (!result.matchedCount) throw new AppError('RM account is no longer active', 403);
+    }
+    return { active: active ?? Boolean(employee?.callingAllocationActive), languages: languages ?? employee?.callingLanguages ?? [] };
+  },
+  async reserve(actorId: Types.ObjectId, input: { title: string; fileName: string; size: number; language:string }) {
     await assertCallingBatchAdministrator(actorId);
+    if (!(await this.languages()).includes(input.language)) throw new AppError('Select a language configured by MD',400);
     if (!env.awsRegion || !env.awsCallingListBucketName) throw new AppError('Calling-list S3 storage is not configured', 503);
     const id = new Types.ObjectId();
     const batch = await CallingBatchModel.create({ _id: id, ...input, uploadedBy: actorId, bucket: env.awsCallingListBucketName,
@@ -44,6 +58,17 @@ export const callingBulkService = {
       await CallingBatchModel.updateOne({ _id: batch._id, state: 'UPLOADING' }, { $set: { state: 'QUEUED' }, $unset: { expiresAt: 1, leaseUntil: 1 } });
     } catch (error) { await CallingBatchModel.updateOne({ _id: batch._id, state: 'UPLOADING' }, { $set: { state: 'RESERVED' } }); throw error; }
     return { _id: batch._id, state: 'QUEUED' };
+  },
+  async labelBatch(actorId:Types.ObjectId,batchId:string,language:string) {
+    await assertCallingBatchAdministrator(actorId);
+    if(!Types.ObjectId.isValid(batchId))throw new AppError('Batch not found',404);
+    if(!(await this.languages()).includes(language))throw new AppError('Select a language configured by MD',400);
+    await mongoose.connection.transaction(async session=>{
+      const batch=await CallingBatchModel.findOneAndUpdate({_id:batchId,state:'READY',language:{$exists:false}},{$set:{language}},{new:true,session});
+      if(!batch)throw new AppError('Only a ready batch without a language can be labelled',409);
+      await CallingListModel.updateMany({batch:batch._id,assignedTo:null,language:{$exists:false}},{$set:{language}},{session});
+    });
+    return {language};
   },
   async list(actorId: Types.ObjectId, page: number, limit: number) {
     await assertCallingBatchAdministrator(actorId);
@@ -79,7 +104,7 @@ export async function processCallingBatch() {
       const lease = await CallingBatchModel.updateOne({_id:batch._id,state:'PROCESSING',leaseOwner:owner},{$set:{leaseUntil:new Date(Date.now()+20*60_000)}});
       if(!lease.matchedCount)throw new AppError('Batch processing lease expired',409);
       await callingListStorage.put(batch.bucket,key,workbook);
-      await CallingListModel.updateOne({_id:id,state:{$ne:'READY'}},{$set:{batch:batch._id,part,title:`${batch.title} / ${part}`,fileName:partName,uploadedBy:batch.uploadedBy,bucket:batch.bucket,key,state:'STAGED',candidateStorage:'S3',headers,rowCount:rows.length,originalRowCount:rows.length,size:workbook.length}}, {upsert:true});
+      await CallingListModel.updateOne({_id:id,state:{$ne:'READY'}},{$set:{batch:batch._id,...(batch.language?{language:batch.language}:{}),part,title:`${batch.title} / ${part}`,fileName:partName,uploadedBy:batch.uploadedBy,bucket:batch.bucket,key,state:'STAGED',candidateStorage:'S3',headers,rowCount:rows.length,originalRowCount:rows.length,size:workbook.length}}, {upsert:true});
       await CallingBatchModel.updateOne({_id:batch._id,leaseOwner:owner},{$set:{candidateCount:count,sheetCount:part}});
     });
     await mongoose.connection.transaction(async session=>{
@@ -100,21 +125,16 @@ export async function distributeDailyCallingSheets(now = new Date()) {
   const settings = await CallingDistributionSettingsModel.findOne({key:'daily'}).lean();
   if(settings?.enabled===false)return;
   const role=await RoleModel.findOne({code:'RM',isActive:true}).select('_id').lean();if(!role)return;
-  const rms=await EmployeeModel.find({role:role._id,isActive:true}).select('_id').sort({employeeCode:1}).lean();
+  const rms=await EmployeeModel.find({role:role._id,isActive:true,callingAllocationActive:true}).select('_id callingLanguages').sort({employeeCode:1}).lean();
   // Rotate the first recipient daily so a small remaining pool is not always given to the same RMs.
   const offset=rms.length?Math.floor(Date.parse(day)/86400_000)%rms.length:0;
   const ordered=[...rms.slice(offset),...rms.slice(0,offset)];
   const slot = 0; // One sheet per RM per day; preserve historical slot references.
   for(const rm of ordered){
-    if(await CallingAllocationModel.exists({day,rm:rm._id}))continue;
-    if(settings?.skipUnfinished){
-      const today=await CallingAllocationModel.find({day,rm:rm._id}).distinct('list');
-      const lists=await CallingListModel.find({assignedTo:rm._id,state:'READY',_id:{$nin:today}}).distinct('_id');
-      if(await CallingCandidateModel.exists({list:{$in:lists},employee:null,callStatus:'NOT_CALLED'}))continue;
-    }
+    if(!rm.callingLanguages?.length || await CallingAllocationModel.exists({day,rm:rm._id}))continue;
     for(let attempt=0;attempt<3;attempt++){
-      const list=await CallingListModel.findOne({state:'READY',candidateStorage:'S3',assignedTo:null,busy:false,batch:{$type:'objectId'}}).sort({createdAt:1,part:1}).select('_id').lean();
-      if(!list)return;
+      const list=await CallingListModel.findOne({state:'READY',candidateStorage:'S3',assignedTo:null,busy:false,batch:{$type:'objectId'},language:{$in:rm.callingLanguages}}).sort({createdAt:1,part:1}).select('_id').lean();
+      if(!list)break;
       try{await assignStoredCallingSheet(list._id,rm._id,undefined,{day,slot});break;}
       catch(error){
         if(await CallingAllocationModel.exists({day,rm:rm._id}))break;
