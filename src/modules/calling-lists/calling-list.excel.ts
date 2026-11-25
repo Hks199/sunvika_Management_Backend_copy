@@ -54,20 +54,20 @@ export async function parseCallingWorkbook(bytes: Buffer) {
 }
 
 
-export const CALLING_TEMPLATE_HEADERS = ['First name', 'Last name', 'Email', 'Mobile number', 'Address', 'City', 'Pincode', 'Notes'] as const;
+export const CALLING_TEMPLATE_HEADERS = ['Candidate name', 'Mobile number', 'Email', 'State', 'District'] as const;
 export async function buildCallingListTemplate(): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Sunvika Management';
   const sheet = workbook.addWorksheet('CP candidates', { views: [{ state: 'frozen', ySplit: 1 }] });
-  sheet.columns = CALLING_TEMPLATE_HEADERS.map(header => ({ header, width: header === 'Address' || header === 'Notes' ? 40 : header === 'Email' ? 32 : 22, style: { numFmt: '@' } }));
+  sheet.columns = CALLING_TEMPLATE_HEADERS.map(header => ({ header, width: header === 'Email' ? 32 : 22, style: { numFmt: '@' } }));
   const header = sheet.getRow(1);
   header.height = 26;
   header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
   header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF17247A' } };
   header.alignment = { vertical: 'middle' };
-  sheet.autoFilter = { from: 'A1', to: 'H1' };
-  sheet.getCell('D1').note = 'Enter the mobile number as text, including country code if available.';
-  sheet.getCell('E1').note = 'State and district can be selected when reviewing and creating the CP account.';
-  sheet.getCell('H1').note = 'Optional calling notes. Keep headers in row 1 and enter one candidate per row below.';
+  sheet.autoFilter = { from: 'A1', to: 'E1' };
+  sheet.getCell('B1').note = 'Required. Enter the mobile number as text, including country code if available.';
+  sheet.getCell('D1').note = 'Required. Enter the same state selected for the batch.';
+  sheet.getCell('E1').note = 'Required. Enter the same district selected for the batch.';
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }

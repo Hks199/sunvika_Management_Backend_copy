@@ -36,7 +36,7 @@ async function accessible(actorId: Types.ObjectId, listId: string, manage = fals
   if (!list || !allowed) throw new AppError('Calling list not found', 404);
   return { list, code };
 }
-const publicFields = 'language candidateStorage batch part assignmentSource title fileName uploadedBy assignedTo assignedAt rowCount originalRowCount deletedConvertedCount deletedCalledCount headers size state createdAt updatedAt';
+const publicFields = 'allocationState allocationDistrict language candidateStorage batch part assignmentSource title fileName uploadedBy assignedTo assignedAt rowCount originalRowCount deletedConvertedCount deletedCalledCount headers size state createdAt updatedAt';
 export const callingListService = {
   async template(actorId: Types.ObjectId) {
     const code = await actor(actorId);

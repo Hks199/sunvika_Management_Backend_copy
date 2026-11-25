@@ -29,7 +29,7 @@ const route = (work: (req: express.Request, res: express.Response) => Promise<un
 const param = (value: unknown) => String(value ?? '');
 const batchAdministrator: RequestHandler = async(req,_res,next)=>{try{await assertCallingBatchAdministrator(req.auth!.employeeId);next();}catch(error){next(error);}};
 callingListRouter.use(['/batches','/distribution'],batchAdministrator);
-const bulkReserveSchema = Joi.object({language:Joi.string().trim().min(1).max(60).required(),title:Joi.string().trim().min(1).max(140).required(),fileName:Joi.string().max(180).pattern(/^[^\\/\r\n]+\.xlsx$/i).required(),size:Joi.number().integer().min(22).max(MAX_BULK_SIZE).required()}).unknown(false);
+const bulkReserveSchema = Joi.object({allocationState:Joi.string().hex().length(24).required(),allocationDistrict:Joi.string().hex().length(24).required(),title:Joi.string().trim().min(1).max(140).required(),fileName:Joi.string().max(180).pattern(/^[^\\/\r\n]+\.xlsx$/i).required(),size:Joi.number().integer().min(22).max(MAX_BULK_SIZE).required()}).unknown(false);
 export const distributionSchema=Joi.object({enabled:Joi.boolean().strict().required(),skipUnfinished:Joi.boolean().strict().required()}).unknown(false);
 const languageSchema = Joi.string().trim().min(1).max(60);
 const languagesSchema = Joi.object({languages:Joi.array().items(languageSchema).max(100).unique((a,b)=>a.toLowerCase()===b.toLowerCase()).required()}).unknown(false);
@@ -44,7 +44,7 @@ callingListRouter.patch('/distribution',validateBody(distributionSchema),route(a
 callingListRouter.get('/batches',validateQuery(pageSchema),route(async(req,res)=>{const q=res.locals.validatedQuery;return sendSuccess(res,'Upload batches',await callingBulkService.list(req.auth!.employeeId,q.page,q.limit));}));
 callingListRouter.post('/batches',validateBody(bulkReserveSchema),route(async(req,res)=>sendSuccess(res,'Batch upload reserved',await callingBulkService.reserve(req.auth!.employeeId,req.body),201)));
 callingListRouter.put('/batches/:batchId/file',express.raw({type:[EXCEL_TYPE,'application/octet-stream'],limit:MAX_BULK_SIZE}),route(async(req,res)=>sendSuccess(res,'Workbook queued for splitting',await callingBulkService.upload(req.auth!.employeeId,param(req.params.batchId),req.body),202)));
-callingListRouter.patch('/batches/:batchId/language',validateBody(Joi.object({language:languageSchema.required()}).unknown(false)),route(async(req,res)=>sendSuccess(res,'Batch language saved',await callingBulkService.labelBatch(req.auth!.employeeId,param(req.params.batchId),req.body.language))));
+callingListRouter.patch('/batches/:batchId/location',validateBody(Joi.object({allocationState:Joi.string().hex().length(24).required(),allocationDistrict:Joi.string().hex().length(24).required()}).unknown(false)),route(async(req,res)=>sendSuccess(res,'Batch location saved',await callingBulkService.labelBatchLocation(req.auth!.employeeId,param(req.params.batchId),req.body.allocationState,req.body.allocationDistrict))));
 callingListRouter.post('/batches/:batchId/retry',route(async(req,res)=>sendSuccess(res,'Batch queued for retry',await callingBulkService.retry(req.auth!.employeeId,param(req.params.batchId)))));
 callingListRouter.get('/template', route(async (req, res) => sendSuccess(res, 'Blank CP candidate Excel template', await service.template(req.auth!.employeeId))));
 callingListRouter.get('/managers', route(async (req, res) => sendSuccess(res, 'Active RMs', await service.managers(req.auth!.employeeId))));

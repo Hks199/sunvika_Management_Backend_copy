@@ -1,6 +1,8 @@
 import { Schema, model } from 'mongoose';
 const listSchema = new Schema({
   candidateStorage: { type: String, enum: ['S3', 'DATABASE'], default: 'DATABASE' },
+  allocationState: { type: Schema.Types.ObjectId, ref: 'State' },
+  allocationDistrict: { type: Schema.Types.ObjectId, ref: 'District' },
   language: { type: String, trim: true, maxlength: 60 },
   batch: { type: Schema.Types.ObjectId, ref: 'CallingBatch' }, part: Number,
   assignmentSource: { type: String, enum: ['MANUAL', 'AUTO'] },

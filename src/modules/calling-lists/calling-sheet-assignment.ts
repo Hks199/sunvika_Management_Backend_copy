@@ -18,11 +18,11 @@ export async function assignStoredCallingSheet(listId: Types.ObjectId, rmId: Typ
     if (!role) throw new AppError('Select an active RM', 400);
     if (automatic) {
       if (indiaDay(new Date()) !== automatic.day) throw new AppError('Allocation day changed; retry', 409);
-      if (!list.language) throw new AppError('Sheet language is missing', 409);
-      const available = await EmployeeModel.updateOne({ _id: rmId, role: role._id, isActive: true, callingAllocationActive: true, callingLanguages: list.language }, { $inc: { callingAllocationRevision: 1 } }, { session });
+      if (!list.allocationState || !list.allocationDistrict) throw new AppError('Sheet state and district are missing', 409);
+      const available = await EmployeeModel.updateOne({ _id: rmId, role: role._id, isActive: true, callingAllocationActive: true, 'address.state': list.allocationState, 'address.district': list.allocationDistrict }, { $inc: { callingAllocationRevision: 1 } }, { session });
       if (!available.matchedCount) throw new AppError('RM is not available for automatic allocation', 409);
     } else if (!await EmployeeModel.exists({ _id: rmId, role: role._id, isActive: true }).session(session)) throw new AppError('Select an active RM', 400);
-    const claimed = await CallingListModel.updateOne({ _id: listId, state: 'READY', candidateStorage: 'S3', assignedTo: null, busy: false, ...(automatic ? {language:list.language} : {}) }, {
+    const claimed = await CallingListModel.updateOne({ _id: listId, state: 'READY', candidateStorage: 'S3', assignedTo: null, busy: false, ...(automatic ? {allocationState:list.allocationState,allocationDistrict:list.allocationDistrict} : {}) }, {
       $set: { candidateStorage: 'DATABASE', assignedTo: rmId, assignedAt: new Date(), assignmentSource: automatic ? 'AUTO' : 'MANUAL', ...(actorId ? { assignedBy: actorId } : {}) }
     }, { session });
     if (!claimed.modifiedCount) throw new AppError('Another request assigned this sheet; refresh and retry', 409);

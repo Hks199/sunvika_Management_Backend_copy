@@ -12,13 +12,14 @@ export async function buildCallingSheet(headers: string[], rows: string[][]) {
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 /** Hold one 50-entry sheet at a time, rather than loading all worksheet rows. */
-export async function splitCallingWorkbook(bytes: Buffer, save: (headers: string[], rows: string[][], part: number, count: number) => Promise<void>) {
+export async function splitCallingWorkbook(bytes: Buffer, save: (headers: string[], rows: string[][], part: number, count: number) => Promise<void>, expectedLocation?: { state:string; district:string }) {
   if (bytes.length < 22 || bytes.length > MAX_BULK_SIZE) throw new AppError('Choose an .xlsx workbook up to 100 MB', 400);
   if (checkCallingArchive(bytes, 768 * 1024 * 1024).worksheetCount !== 1) throw new AppError('Use exactly one worksheet', 400);
   const reader = new ExcelJS.stream.xlsx.WorkbookReader(Readable.from(bytes), { worksheets: 'emit', sharedStrings: 'cache', styles: 'cache', hyperlinks: 'ignore', entries: 'ignore' });
   // ExcelJS may encounter a worksheet before workbook.xml in a valid ZIP archive.
   Object.assign(reader, { model: { sheets: [] } });
-  let sheetCount = 0, count = 0, part = 0, headers: string[] = [], rows: string[][] = [];
+  let sheetCount = 0, count = 0, part = 0, headers: string[] = [], rows: string[][] = [], mobileIndex=-1, stateIndex=-1, districtIndex=-1;
+  const normalize=(value:string)=>value.trim().replace(/\s+/g,' ').toLocaleLowerCase('en-IN');
   function text(cell: ExcelJS.Cell) { const value = cell.text.trim(); if (value.length > 2000) throw new AppError('A cell exceeds 2,000 characters', 400); return value; }
   for await (const sheet of reader) {
     if (++sheetCount !== 1) throw new AppError('Use exactly one worksheet', 400);
@@ -27,12 +28,18 @@ export async function splitCallingWorkbook(bytes: Buffer, save: (headers: string
         if (row.cellCount < 1 || row.cellCount > 50) throw new AppError('Use between 1 and 50 columns', 400);
         headers = Array.from({ length: row.cellCount }, (_, i) => text(row.getCell(i + 1)));
         if (headers.some(h => !h) || new Set(headers.map(h => h.toLowerCase())).size !== headers.length) throw new AppError('The first row must contain unique, nonempty column headers', 400);
+        const names=headers.map(normalize);
+        mobileIndex=names.findIndex(h=>['mobile number','mobile','phone number','phone'].includes(h));
+        stateIndex=names.indexOf('state');districtIndex=names.indexOf('district');
+        if(mobileIndex<0||stateIndex<0||districtIndex<0)throw new AppError('Mobile number, State and District columns are required',400);
         continue;
       }
       if (!headers.length) throw new AppError('Put the column headers in row 1', 400);
       if (row.number > 1_048_576 || row.cellCount > headers.length) throw new AppError('Candidate columns must match the header row', 400);
       const values = headers.map((_, i) => text(row.getCell(i + 1)));
       if (!values.some(Boolean)) continue;
+      if(!values[mobileIndex]||!values[stateIndex]||!values[districtIndex])throw new AppError(`Row ${row.number}: mobile number, state and district are required`,400);
+      if(expectedLocation&&(normalize(values[stateIndex]!)!==normalize(expectedLocation.state)||normalize(values[districtIndex]!)!==normalize(expectedLocation.district)))throw new AppError(`Row ${row.number}: state and district must match the selected batch location`,400);
       if (++count > MAX_BULK_ROWS) throw new AppError('Use up to 1,000,000 candidates per upload', 400);
       rows.push(values);
       if (rows.length === SHEET_ENTRIES) { await save(headers, rows, ++part, count); rows = []; }

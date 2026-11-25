@@ -1,3 +1,4 @@
+import {stateImportRouter} from '../modules/state-imports/state-import.routes.js';
 import { cpImportRouter } from '../modules/cp-imports/cp-import.routes.js';
 import { announcementRouter } from '../modules/announcements/announcement.routes.js';
 import { queryRouter, notificationRouter } from '../modules/queries/query.routes.js';
@@ -38,6 +39,7 @@ apiRouter.use('/notifications', notificationRouter);
 apiRouter.use('/employees', employeeRouter);
 apiRouter.use('/cp-imports', cpImportRouter);
 apiRouter.use('/calling-lists', callingListRouter);
+apiRouter.use('/state-candidates',stateImportRouter);
 apiRouter.use('/calling-reports', callingReportRouter);
 apiRouter.use('/roles', roleRouter);
 apiRouter.use('/geography', geographyRouter);

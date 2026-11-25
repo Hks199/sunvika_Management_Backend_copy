@@ -1,3 +1,4 @@
+import {startStateWorker} from './modules/state-imports/state-import.service.js';
 import { grantRmLeadAssignment } from './modules/roles/services/role.service.js';
 import { startCpImportWorker } from './modules/cp-imports/cp-import.service.js';
 import { retireAdminHeadRole } from './modules/roles/services/retire-admin-head.js';
@@ -16,6 +17,7 @@ async function start(): Promise<void> {
   await grantRmLeadAssignment();
   const stopCpImports = startCpImportWorker();
   const stopCpReminders = startCpReminderWorker();
+  const stopStateWorker = startStateWorker();
   const stopCallingWorker = startCallingDistributionWorker();
   const server = app.listen(env.port, () => logger.info({ port: env.port }, 'Sunvika API listening'));
 
@@ -23,6 +25,7 @@ async function start(): Promise<void> {
     logger.info({ signal }, 'Shutting down');
     stopCpImports();
     stopCallingWorker();
+    stopStateWorker();
     stopCpReminders();
     server.close((error) => {
       if (error) {

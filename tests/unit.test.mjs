@@ -582,15 +582,15 @@ test('blank calling-list template contains only supported headers and filled cop
   assert.equal(workbook.worksheets.length, 1);
   const sheet = workbook.worksheets[0];
   assert.equal(sheet.rowCount, 1);
-  assert.deepEqual(sheet.getRow(1).values.slice(1), [...CALLING_TEMPLATE_HEADERS]);
-  assert.equal(sheet.getColumn(4).numFmt, '@');
-  assert.equal(sheet.getColumn(7).numFmt, '@');
+  assert.deepEqual(sheet.getRow(1).values.slice(1), ['Candidate name', 'Mobile number', 'Email', 'State', 'District']);
+  assert.deepEqual([...CALLING_TEMPLATE_HEADERS], ['Candidate name', 'Mobile number', 'Email', 'State', 'District']);
+  assert.equal(sheet.getColumn(2).numFmt, '@');
   await assert.rejects(parseCallingWorkbook(bytes), /at least one candidate/);
-  sheet.addRow(['Asha', 'Patel', 'asha@example.invalid', '+919999999999', 'Example address', 'Mumbai', '012345', 'Call next week']);
+  sheet.addRow(['Asha Patel', '+919999999999', 'asha@example.invalid', 'Maharashtra', 'Mumbai']);
   const parsed = await parseCallingWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()));
   assert.equal(parsed.rows.length, 1);
-  assert.equal(parsed.rows[0].values[3], '+919999999999');
-  assert.equal(parsed.rows[0].values[6], '012345');
+  assert.equal(parsed.rows[0].values[1], '+919999999999');
+  assert.equal(parsed.rows[0].values[4], 'Mumbai');
 });
 
 test('only MD and MIS can download the blank upload template', async (t) => {
@@ -1638,12 +1638,12 @@ test('bulk calling workbook splits 101 entries into 50, 50 and 1, retaining head
   const { default: ExcelJS } = await import('exceljs');
   const { splitCallingWorkbook, buildCallingSheet } = await import('../dist/modules/calling-lists/calling-bulk.excel.js');
   const { parseCallingWorkbook } = await import('../dist/modules/calling-lists/calling-list.excel.js');
-  const workbook = new ExcelJS.Workbook(), sheet = workbook.addWorksheet('Candidates'); sheet.addRow(['Name','Mobile']);
-  for(let i=0;i<101;i++)sheet.addRow([`Candidate ${i}`,'0123456789']);
+  const workbook = new ExcelJS.Workbook(), sheet = workbook.addWorksheet('Candidates'); sheet.addRow(['Name','Mobile','State','District']);
+  for(let i=0;i<101;i++)sheet.addRow([`Candidate ${i}`,'0123456789','Bihar','Patna']);
   const parts=[];
   const result=await splitCallingWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()),async(headers,rows,part,count)=>{
     const parsed=await parseCallingWorkbook(await buildCallingSheet(headers,rows));
-    assert.deepEqual(parsed.headers,['Name','Mobile']);assert.equal(parsed.rows[0].values[1],'0123456789');
+    assert.deepEqual(parsed.headers,['Name','Mobile','State','District']);assert.equal(parsed.rows[0].values[1],'0123456789');
     parts.push({length:parsed.rows.length,part,count,first:parsed.rows[0].values[0]});
   });
   assert.deepEqual(result,{candidateCount:101,sheetCount:3});assert.deepEqual(parts.map(p=>p.length),[50,50,1]);
@@ -2179,7 +2179,7 @@ test('calling allocation availability is RM-only and distribution selects availa
   t.mock.method(EmployeeModel,'findOne',()=>query({role,callingAllocationActive:active}));
   t.mock.method(EmployeeModel,'updateOne',async(filter,update)=>{assert.equal(String(filter._id),String(actor));active=update.$set.callingAllocationActive;return {matchedCount:1};});
   t.mock.method(RoleModel,'findOne',filter=>query(filter.code==='RM'?(isRM?{_id:role}:null):{_id:role}));
-  t.mock.method(EmployeeModel,'find',filter=>{selected=filter;return query([{_id:actor,callingLanguages:['Hindi']}]);});
+  t.mock.method(EmployeeModel,'find',filter=>{selected=filter;return query([{_id:actor,address:{state:new Types.ObjectId(),district:new Types.ObjectId()}}]);});
   t.mock.method(CallingDistributionSettingsModel,'findOne',()=>query({enabled:true,skipUnfinished:true}));
   t.mock.method(CallingAllocationModel,'exists',async()=>{checks++;return true;});
   t.mock.method(CallingListModel,'findOne',()=>{throw new Error('Already allocated RM must not receive a second sheet');});
@@ -2191,23 +2191,53 @@ test('calling allocation availability is RM-only and distribution selects availa
   assert.equal(selected.callingAllocationActive,true);assert.equal(checks,1);
 });
 
-test('calling sheets are selected only for each available RM language and missing matches do not block others',async t=>{
- const {Types}=await import('mongoose');
- const {distributeDailyCallingSheets,callingBulkService}=await import('../dist/modules/calling-lists/calling-bulk.service.js');
- const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');
- const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');
- const {CallingDistributionSettingsModel,CallingAllocationModel,CallingLanguageOptionsModel}=await import('../dist/modules/calling-lists/calling-bulk.model.js');
- const {CallingListModel}=await import('../dist/modules/calling-lists/calling-list.model.js');
- const role=new Types.ObjectId(),actor=new Types.ObjectId(),other=new Types.ObjectId();const seen=[];
+test('calling sheets match each RM state and district, and missing matches do not block others',async t=>{
+ const {Types}=await import('mongoose');const {distributeDailyCallingSheets}=await import('../dist/modules/calling-lists/calling-bulk.service.js');
+ const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');const {CallingDistributionSettingsModel,CallingAllocationModel}=await import('../dist/modules/calling-lists/calling-bulk.model.js');const {CallingListModel}=await import('../dist/modules/calling-lists/calling-list.model.js');
+ const role=new Types.ObjectId(),state=new Types.ObjectId(),district1=new Types.ObjectId(),district2=new Types.ObjectId(),actor=new Types.ObjectId(),other=new Types.ObjectId(),seen=[];
  const query=value=>({select(){return this;},sort(){return this;},lean:async()=>value});
- t.mock.method(EmployeeModel,'findOne',()=>query({role,callingAllocationActive:true,callingLanguages:['Hindi']}));
- t.mock.method(RoleModel,'findOne',()=>query({_id:role}));
- t.mock.method(EmployeeModel,'find',()=>query([{_id:actor,callingLanguages:['Hindi']},{_id:other,callingLanguages:['Tamil']}]));
- t.mock.method(CallingDistributionSettingsModel,'findOne',()=>query({enabled:true}));
- t.mock.method(CallingLanguageOptionsModel,'findOne',()=>query({languages:['Hindi','Tamil']}));
- t.mock.method(CallingAllocationModel,'exists',async()=>false);
- t.mock.method(CallingListModel,'findOne',filter=>{seen.push(filter.language.$in);return query(null);});
- await distributeDailyCallingSheets(new Date('2026-11-13T00:00:00Z'));
- assert.equal(seen.length,2);assert.ok(seen.some(x=>x[0]==='Hindi'));assert.ok(seen.some(x=>x[0]==='Tamil'));
- await assert.rejects(callingBulkService.availability(actor,undefined,['Unconfigured']),e=>e.statusCode===400);
+ t.mock.method(RoleModel,'findOne',()=>query({_id:role}));t.mock.method(EmployeeModel,'find',()=>query([{_id:actor,address:{state,district:district1}},{_id:other,address:{state,district:district2}},{_id:new Types.ObjectId(),address:{}}]));t.mock.method(CallingDistributionSettingsModel,'findOne',()=>query({enabled:true}));t.mock.method(CallingAllocationModel,'exists',async()=>false);t.mock.method(CallingListModel,'findOne',filter=>{seen.push(filter);return query(null);});
+ await distributeDailyCallingSheets(new Date('2026-11-13T00:00:00Z'));assert.equal(seen.length,2);assert.ok(seen.every(x=>String(x.allocationState)===String(state)));assert.deepEqual(new Set(seen.map(x=>String(x.allocationDistrict))),new Set([String(district1),String(district2)]));
 });
+
+test('state candidate template and streaming split preserve rows and group state and district',async()=>{
+ const {default:ExcelJS}=await import('exceljs');const {mkdtemp,readFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const {template,splitWorkbook,HEADERS}=await import('../dist/modules/state-imports/state-import.service.js');
+ const book=new ExcelJS.Workbook();await book.xlsx.load(Buffer.from((await template()).base64,'base64'));const sheet=book.worksheets[0];assert.deepEqual(sheet.getRow(1).values.slice(1),[...HEADERS]);
+ sheet.addRow(['One','0012345678','a@example.test','Bihar','Patna']);sheet.addRow(['Two','0098765432','',' bihar ',' PATNA ']);sheet.addRow(['Three','123','','Bihar','Gaya']);
+ const dir=await mkdtemp(join(tmpdir(),'state-test-'));try{const result=await splitWorkbook(Buffer.from(await book.xlsx.writeBuffer()),dir);assert.equal(result.count,3);assert.equal(result.groups.length,2);const patna=result.groups.find(x=>x.district==='Patna');assert.equal(patna.count,2);const lines=(await readFile(patna.path,'utf8')).trim().split('\n').map(JSON.parse);assert.equal(lines[0][1],'0012345678');assert.equal(lines[1][0],'Two');sheet.addRow(['Four','1','','','Gaya']);await assert.rejects(splitWorkbook(Buffer.from(await book.xlsx.writeBuffer()),dir),/mobile number, state and district are required/);sheet.getRow(5).getCell(4).value='Bihar';sheet.getRow(5).getCell(5).value='';await assert.rejects(splitWorkbook(Buffer.from(await book.xlsx.writeBuffer()),dir),/mobile number, state and district are required/);sheet.getRow(5).getCell(5).value='Patna';sheet.getRow(5).getCell(2).value='';await assert.rejects(splitWorkbook(Buffer.from(await book.xlsx.writeBuffer()),dir),/mobile number, state and district are required/);}finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('candidate import accepts only mandatory mobile, state and district columns',async()=>{
+ const {default:ExcelJS}=await import('exceljs');const {mkdtemp,rm,readFile}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');const {splitWorkbook}=await import('../dist/modules/state-imports/state-import.service.js');
+ const book=new ExcelJS.Workbook();const sheet=book.addWorksheet('Candidates');sheet.addRow(['Mobile number','State','District']);sheet.addRow(['001234','Bihar','Patna']);const dir=await mkdtemp(join(tmpdir(),'mandatory-fields-'));try{const result=await splitWorkbook(Buffer.from(await book.xlsx.writeBuffer()),dir);assert.equal(result.count,1);assert.deepEqual(JSON.parse((await readFile(result.groups[0].path,'utf8')).trim()),['','001234','','Bihar','Patna']);sheet.getCell('C1').value='Email';await assert.rejects(splitWorkbook(Buffer.from(await book.xlsx.writeBuffer()),dir),/columns are required/);}finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('state candidate access is limited to MD MIS and CP Head',async t=>{
+ const {Types}=await import('mongoose');const {checkAccess}=await import('../dist/modules/state-imports/state-import.service.js');const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');let code='MD';const query=value=>({select(){return this;},lean:async()=>value});t.mock.method(EmployeeModel,'findOne',()=>query({role:new Types.ObjectId()}));t.mock.method(RoleModel,'findOne',()=>query({code}));const actor=new Types.ObjectId();for(code of ['MD','MIS','CP_HEAD'])await checkAccess(actor);for(code of ['RM','CP'])await assert.rejects(checkAccess(actor),e=>e.statusCode===403);
+});
+
+test('state import worker stores separate XLSX sheets and preview reads them',async t=>{
+ const {default:ExcelJS}=await import('exceljs');const {Types}=await import('mongoose');const {template,processStateImport,stateService}=await import('../dist/modules/state-imports/state-import.service.js');const {StateImportModel,StateSheetSequenceModel}=await import('../dist/modules/state-imports/state-import.model.js');const {callingListStorage}=await import('../dist/modules/calling-lists/calling-list.storage.js');
+ const book=new ExcelJS.Workbook();await book.xlsx.load(Buffer.from((await template()).base64,'base64'));book.worksheets[0].addRow(['A','00123','','Bihar','Patna']);book.worksheets[0].addRow(['B','00456','','Bihar','Gaya']);const source=Buffer.from(await book.xlsx.writeBuffer());const job={_id:new Types.ObjectId(),bucket:'test-bucket',key:'source'};const objects=new Map([['source',source]]);let result;
+ let serial=0;t.mock.method(StateSheetSequenceModel,'findOneAndUpdate',async()=>({value:++serial}));t.mock.method(StateImportModel,'findOneAndUpdate',()=>({select:async()=>job}));t.mock.method(StateImportModel,'updateOne',async(_query,update)=>{if(update.$set?.state==='READY')result=update.$set;return {matchedCount:1};});t.mock.method(callingListStorage,'read',async(_bucket,key)=>objects.get(key));t.mock.method(callingListStorage,'put',async(_bucket,key,bytes)=>{objects.set(key,bytes);});
+ assert.equal(await processStateImport(),true);assert.equal(result.state,'READY');assert.equal(result.count,2);assert.equal(result.groups.length,2);assert.match(result.groups[0].sheetName,/^CCP-\d{8}-000001$/);assert.match(result.groups[1].sheetName,/^CCP-\d{8}-000002$/);assert.ok(result.groups[0].generatedAt instanceof Date);assert.ok(result.groups[0].key.endsWith(`${result.groups[0].sheetName}.xlsx`));
+ const group=result.groups.find(x=>x.district==='Patna');const output=new ExcelJS.Workbook();await output.xlsx.load(objects.get(group.key));assert.equal(output.worksheets[0].getRow(2).getCell(2).text,'00123');
+ t.mock.method(StateImportModel,'findOne',()=>({select(){return this;},lean:async()=>({...job,groups:result.groups})}));const preview=await stateService.preview(String(job._id),group.groupId,1);assert.deepEqual(preview.rows,[['A','00123','','Bihar','Patna']]);
+});
+
+test('automatic assignment rechecks RM state and district transactionally',async t=>{
+ const {default:mongoose,Types}=await import('mongoose');const {assignStoredCallingSheet}=await import('../dist/modules/calling-lists/calling-sheet-assignment.js');const {buildCallingSheet}=await import('../dist/modules/calling-lists/calling-bulk.excel.js');const {indiaDay}=await import('../dist/modules/calling-reports/calling-report.policy.js');const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');const {CallingListModel,CallingCandidateModel}=await import('../dist/modules/calling-lists/calling-list.model.js');const {CallingAllocationModel}=await import('../dist/modules/calling-lists/calling-bulk.model.js');const {callingListStorage}=await import('../dist/modules/calling-lists/calling-list.storage.js');
+ const state=new Types.ObjectId(),district=new Types.ObjectId(),rm=new Types.ObjectId(),list=new Types.ObjectId(),role=new Types.ObjectId();let allow=true,claims=0,checked;const bytes=await buildCallingSheet(['Name'],[['Candidate']]);const data={_id:list,bucket:'bucket',key:'key',allocationState:state,allocationDistrict:district,rowCount:1,headers:['Name']};
+ t.mock.method(CallingListModel,'findOne',()=>({select:async()=>data}));t.mock.method(callingListStorage,'read',async()=>bytes);t.mock.method(mongoose.connection,'transaction',async fn=>fn({}));t.mock.method(RoleModel,'findOne',()=>({session:async()=>({_id:role})}));t.mock.method(EmployeeModel,'updateOne',async filter=>{checked=filter;return {matchedCount:allow?1:0};});t.mock.method(CallingListModel,'updateOne',async filter=>{claims++;assert.equal(String(filter.allocationState),String(state));assert.equal(String(filter.allocationDistrict),String(district));return {modifiedCount:1};});t.mock.method(CallingCandidateModel,'insertMany',async()=>[]);t.mock.method(CallingAllocationModel,'create',async()=>[]);t.mock.method(CallingListModel,'findById',()=>({select:async()=>({_id:list})}));
+ const info={day:indiaDay(new Date()),slot:0};await assignStoredCallingSheet(list,rm,undefined,info);assert.equal(String(checked['address.state']),String(state));assert.equal(String(checked['address.district']),String(district));assert.equal(checked.callingAllocationActive,true);assert.equal(claims,1);allow=false;await assert.rejects(assignStoredCallingSheet(list,rm,undefined,info),e=>e.statusCode===409);assert.equal(claims,1);
+});
+
+test('calling workbook requires mobile, state and district and validates the batch location',async()=>{
+ const {default:ExcelJS}=await import('exceljs');const {splitCallingWorkbook}=await import('../dist/modules/calling-lists/calling-bulk.excel.js');const book=new ExcelJS.Workbook();const sheet=book.addWorksheet('Candidates');sheet.addRow(['Mobile number','State','District']);sheet.addRow(['001234',' bihar ',' PATNA ']);const location={state:'Bihar',district:'Patna'};const run=()=>splitCallingWorkbook(Buffer.from(bytes),async()=>{},location);let bytes=await book.xlsx.writeBuffer();assert.equal((await run()).candidateCount,1);
+ for(const column of [1,2,3]){const old=sheet.getCell(2,column).value;sheet.getCell(2,column).value='';bytes=await book.xlsx.writeBuffer();await assert.rejects(run(),/Row 2: mobile number, state and district are required/);sheet.getCell(2,column).value=old;}
+ sheet.getCell('C2').value='Gaya';bytes=await book.xlsx.writeBuffer();await assert.rejects(run(),/must match the selected batch location/);sheet.getCell('C1').value='City';bytes=await book.xlsx.writeBuffer();await assert.rejects(run(),/columns are required/);
+});
+
+
+test('CCP sheet numbers use India date and increment per day',async t=>{const {nextSheetName}=await import('../dist/modules/state-imports/state-import.service.js');const {StateSheetSequenceModel}=await import('../dist/modules/state-imports/state-import.model.js');const counts=new Map();t.mock.method(StateSheetSequenceModel,'findOneAndUpdate',async filter=>{const value=(counts.get(filter._id)??0)+1;counts.set(filter._id,value);return {value};});assert.equal(await nextSheetName(new Date('2026-11-24T18:29:59Z')),'CCP-20261124-000001');assert.equal(await nextSheetName(new Date('2026-11-24T18:30:00Z')),'CCP-20261125-000001');assert.equal(await nextSheetName(new Date('2026-11-25T01:00:00Z')),'CCP-20261125-000002');});

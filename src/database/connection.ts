@@ -1,3 +1,4 @@
+import {StateImportModel} from '../modules/state-imports/state-import.model.js';
 import mongoose from 'mongoose';
 import {upgradeReminderScheduleIndexes} from '../modules/cp-reminders/cp-reminders.migration.js';
 import {CP_REMINDER_MODELS} from '../modules/cp-reminders/cp-reminders.model.js';
@@ -34,9 +35,9 @@ export async function connectDatabase(): Promise<void> {
     maxPoolSize: env.mongoMaxPoolSize,
     autoIndex: env.nodeEnv !== 'production'
   });
-  await Promise.all([CallingActivityModel.init(), CallingDailyReportModel.init(), CallingBatchModel.init(), CallingAllocationModel.init(), CallingDistributionSettingsModel.init(), CallingListModel.init(), CallingCandidateModel.init()]);
+  await Promise.all([StateImportModel.init(), CallingActivityModel.init(), CallingDailyReportModel.init(), CallingBatchModel.init(), CallingAllocationModel.init(), CallingDistributionSettingsModel.init(), CallingListModel.init(), CallingCandidateModel.init()]);
   if (env.nodeEnv === 'production') await Promise.all([
-    CallingBatchModel.createIndexes(), CallingAllocationModel.createIndexes(), CallingDistributionSettingsModel.createIndexes(), CallingListModel.createIndexes(), CallingCandidateModel.createIndexes(),
+    StateImportModel.createIndexes(), CallingBatchModel.createIndexes(), CallingAllocationModel.createIndexes(), CallingDistributionSettingsModel.createIndexes(), CallingListModel.createIndexes(), CallingCandidateModel.createIndexes(),
     StateModel.createIndexes(), DistrictModel.createIndexes(), BranchModel.createIndexes(),
     LeadModel.createIndexes(), LeadStatusHistoryModel.createIndexes(), VisitModel.createIndexes(),
     CustomerModel.createIndexes(), CustomerDocumentModel.createIndexes(), CustomerDocumentUploadModel.createIndexes(), CustomerActivityModel.createIndexes(),

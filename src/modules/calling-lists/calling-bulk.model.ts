@@ -1,6 +1,8 @@
 import { Schema, model } from 'mongoose';
 const batchSchema = new Schema({
   title: { type: String, required: true, maxlength: 140 }, fileName: { type: String, required: true, maxlength: 180 },
+  allocationState: { type: Schema.Types.ObjectId, ref: 'State' },
+  allocationDistrict: { type: Schema.Types.ObjectId, ref: 'District' },
   language: { type: String, trim: true, maxlength: 60 },
   uploadedBy: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   bucket: { type: String, required: true, select: false }, key: { type: String, required: true, select: false }, size: { type: Number, required: true },

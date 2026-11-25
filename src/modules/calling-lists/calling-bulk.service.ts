@@ -5,6 +5,9 @@ import { AppError } from '../../utils/app-error.util.js';
 import { logger } from '../../services/logger.service.js';
 import { EmployeeModel } from '../employees/models/employee.model.js';
 import { RoleModel } from '../roles/models/role.model.js';
+import { StateModel } from '../geography/models/state.model.js';
+import { DistrictModel } from '../geography/models/district.model.js';
+import { geographyService } from '../geography/services/geography.service.js';
 import { indiaDay } from '../calling-reports/calling-report.policy.js';
 import { CallingBatchModel, CallingAllocationModel, CallingDistributionSettingsModel, CallingLanguageOptionsModel } from './calling-bulk.model.js';
 import { CallingListModel, CallingCandidateModel } from './calling-list.model.js';
@@ -17,7 +20,7 @@ export async function assertCallingBatchAdministrator(actorId: Types.ObjectId) {
   const role = employee ? await RoleModel.findOne({ _id: employee.role, isActive: true }).select('code').lean() : null;
   if (!role || !['MD','MIS'].includes(role.code)) throw new AppError('Only MD and MIS can manage upload batches and daily distribution', 403);
 }
-const publicBatch = 'language title fileName uploadedBy state size candidateCount sheetCount error createdAt completedAt';
+const publicBatch = 'allocationState allocationDistrict language title fileName uploadedBy state size candidateCount sheetCount error createdAt completedAt';
 export function dailyDistributionTime(now: Date) {
   return { day: indiaDay(now), due: true };
 }
@@ -36,9 +39,9 @@ export const callingBulkService = {
     }
     return { active: active ?? Boolean(employee?.callingAllocationActive), languages: languages ?? employee?.callingLanguages ?? [] };
   },
-  async reserve(actorId: Types.ObjectId, input: { title: string; fileName: string; size: number; language:string }) {
+  async reserve(actorId: Types.ObjectId, input: { title: string; fileName: string; size: number; allocationState:string; allocationDistrict:string }) {
     await assertCallingBatchAdministrator(actorId);
-    if (!(await this.languages()).includes(input.language)) throw new AppError('Select a language configured by MD',400);
+    await geographyService.validateEmployeePlacement(input.allocationState,input.allocationDistrict);
     if (!env.awsRegion || !env.awsCallingListBucketName) throw new AppError('Calling-list S3 storage is not configured', 503);
     const id = new Types.ObjectId();
     const batch = await CallingBatchModel.create({ _id: id, ...input, uploadedBy: actorId, bucket: env.awsCallingListBucketName,
@@ -59,16 +62,16 @@ export const callingBulkService = {
     } catch (error) { await CallingBatchModel.updateOne({ _id: batch._id, state: 'UPLOADING' }, { $set: { state: 'RESERVED' } }); throw error; }
     return { _id: batch._id, state: 'QUEUED' };
   },
-  async labelBatch(actorId:Types.ObjectId,batchId:string,language:string) {
+  async labelBatchLocation(actorId:Types.ObjectId,batchId:string,allocationState:string,allocationDistrict:string) {
     await assertCallingBatchAdministrator(actorId);
     if(!Types.ObjectId.isValid(batchId))throw new AppError('Batch not found',404);
-    if(!(await this.languages()).includes(language))throw new AppError('Select a language configured by MD',400);
+    await geographyService.validateEmployeePlacement(allocationState,allocationDistrict);
     await mongoose.connection.transaction(async session=>{
-      const batch=await CallingBatchModel.findOneAndUpdate({_id:batchId,state:'READY',language:{$exists:false}},{$set:{language}},{new:true,session});
-      if(!batch)throw new AppError('Only a ready batch without a language can be labelled',409);
-      await CallingListModel.updateMany({batch:batch._id,assignedTo:null,language:{$exists:false}},{$set:{language}},{session});
+      const batch=await CallingBatchModel.findOneAndUpdate({_id:batchId,state:'READY',$or:[{allocationState:{$exists:false}},{allocationDistrict:{$exists:false}}]},{$set:{allocationState,allocationDistrict}},{new:true,session});
+      if(!batch)throw new AppError('Only a ready batch without a complete location can be labelled',409);
+      await CallingListModel.updateMany({batch:batch._id,assignedTo:null},{$set:{allocationState,allocationDistrict}},{session});
     });
-    return {language};
+    return {allocationState,allocationDistrict};
   },
   async list(actorId: Types.ObjectId, page: number, limit: number) {
     await assertCallingBatchAdministrator(actorId);
@@ -97,6 +100,12 @@ export async function processCallingBatch() {
   if (!batch) return false;
   try {
     const bytes = await callingListStorage.read(batch.bucket,batch.key);
+    let expectedLocation: {state:string;district:string}|undefined;
+    if(batch.allocationState&&batch.allocationDistrict){
+      const [state,district]=await Promise.all([StateModel.findById(batch.allocationState).select('name').lean(),DistrictModel.findOne({_id:batch.allocationDistrict,state:batch.allocationState}).select('name').lean()]);
+      if(!state||!district)throw new AppError('Batch state or district is no longer available',400);
+      expectedLocation={state:state.name,district:district.name};
+    }
     const counts = await splitCallingWorkbook(bytes,async(headers,rows,part,count)=>{
       const id = new Types.ObjectId(createHash('sha256').update(`${batch._id}:${part}`).digest('hex').slice(0,24));
       const partName = `${batch._id}_part_${String(part).padStart(5,'0')}.xlsx`, key = `calling-lists/batches/${batch._id}/${partName}`;
@@ -104,9 +113,9 @@ export async function processCallingBatch() {
       const lease = await CallingBatchModel.updateOne({_id:batch._id,state:'PROCESSING',leaseOwner:owner},{$set:{leaseUntil:new Date(Date.now()+20*60_000)}});
       if(!lease.matchedCount)throw new AppError('Batch processing lease expired',409);
       await callingListStorage.put(batch.bucket,key,workbook);
-      await CallingListModel.updateOne({_id:id,state:{$ne:'READY'}},{$set:{batch:batch._id,...(batch.language?{language:batch.language}:{}),part,title:`${batch.title} / ${part}`,fileName:partName,uploadedBy:batch.uploadedBy,bucket:batch.bucket,key,state:'STAGED',candidateStorage:'S3',headers,rowCount:rows.length,originalRowCount:rows.length,size:workbook.length}}, {upsert:true});
+      await CallingListModel.updateOne({_id:id,state:{$ne:'READY'}},{$set:{batch:batch._id,...(batch.allocationState&&batch.allocationDistrict?{allocationState:batch.allocationState,allocationDistrict:batch.allocationDistrict}:{}),part,title:`${batch.title} / ${part}`,fileName:partName,uploadedBy:batch.uploadedBy,bucket:batch.bucket,key,state:'STAGED',candidateStorage:'S3',headers,rowCount:rows.length,originalRowCount:rows.length,size:workbook.length}}, {upsert:true});
       await CallingBatchModel.updateOne({_id:batch._id,leaseOwner:owner},{$set:{candidateCount:count,sheetCount:part}});
-    });
+    },expectedLocation);
     await mongoose.connection.transaction(async session=>{
       const completed = await CallingBatchModel.updateOne({_id:batch._id,state:'PROCESSING',leaseOwner:owner},{$set:{state:'READY',...counts,completedAt:new Date()},$unset:{leaseOwner:1,leaseUntil:1}}, {session});
       if(!completed.modifiedCount)throw new AppError('Batch processing ownership changed',409);
@@ -125,15 +134,15 @@ export async function distributeDailyCallingSheets(now = new Date()) {
   const settings = await CallingDistributionSettingsModel.findOne({key:'daily'}).lean();
   if(settings?.enabled===false)return;
   const role=await RoleModel.findOne({code:'RM',isActive:true}).select('_id').lean();if(!role)return;
-  const rms=await EmployeeModel.find({role:role._id,isActive:true,callingAllocationActive:true}).select('_id callingLanguages').sort({employeeCode:1}).lean();
+  const rms=await EmployeeModel.find({role:role._id,isActive:true,callingAllocationActive:true}).select('_id address.state address.district').sort({employeeCode:1}).lean();
   // Rotate the first recipient daily so a small remaining pool is not always given to the same RMs.
   const offset=rms.length?Math.floor(Date.parse(day)/86400_000)%rms.length:0;
   const ordered=[...rms.slice(offset),...rms.slice(0,offset)];
   const slot = 0; // One sheet per RM per day; preserve historical slot references.
   for(const rm of ordered){
-    if(!rm.callingLanguages?.length || await CallingAllocationModel.exists({day,rm:rm._id}))continue;
+    if(!rm.address?.state || !rm.address?.district || await CallingAllocationModel.exists({day,rm:rm._id}))continue;
     for(let attempt=0;attempt<3;attempt++){
-      const list=await CallingListModel.findOne({state:'READY',candidateStorage:'S3',assignedTo:null,busy:false,batch:{$type:'objectId'},language:{$in:rm.callingLanguages}}).sort({createdAt:1,part:1}).select('_id').lean();
+      const list=await CallingListModel.findOne({state:'READY',candidateStorage:'S3',assignedTo:null,busy:false,batch:{$type:'objectId'},allocationState:rm.address.state,allocationDistrict:rm.address.district}).sort({createdAt:1,part:1}).select('_id').lean();
       if(!list)break;
       try{await assignStoredCallingSheet(list._id,rm._id,undefined,{day,slot});break;}
       catch(error){

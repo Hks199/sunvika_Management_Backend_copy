@@ -128,6 +128,11 @@ test('CP-to-customer options, uploads and conversion reject unauthenticated requ
   }
 });
 
+test('candidate sheet endpoints require authentication',async()=>{
+  const id='0123456789abcdef01234567';
+  for(const [method,path] of [['GET','/state-candidates'],['GET','/state-candidates/template'],['POST','/state-candidates'],['PUT',`/state-candidates/${id}/file`],['GET',`/state-candidates/${id}/groups/${id}/preview`],['GET',`/state-candidates/${id}/groups/${id}/download`]])assert.equal((await fetch(`${baseUrl}/api/v1${path}`,{method})).status,401);
+});
+
 test('bulk upload queue, retry and distribution settings require authentication', async () => {
   for(const [method,path] of [['GET','/batches'],['POST','/batches'],['PUT','/batches/0123456789abcdef01234567/file'],['POST','/batches/0123456789abcdef01234567/retry'],['GET','/distribution'],['PATCH','/distribution']]) {
     assert.equal((await fetch(`${baseUrl}/api/v1/calling-lists${path}`,{method})).status,401);
