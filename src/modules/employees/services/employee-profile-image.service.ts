@@ -16,6 +16,7 @@ export const employeeProfileImageService={
   },
   async assertEdit(actorId:Types.ObjectId,value:string){
     const id=employeeId(value);
+    if(actorId.equals(id)) return id;
     if(!await roleService.hasPermission(actorId,'employees.update'))throw new AppError('You do not have permission to change employee profile images',403);
     if(!await hierarchyService.canAccessEmployee(actorId,id,'manage'))throw new AppError('Employee not found',404);
     return id;

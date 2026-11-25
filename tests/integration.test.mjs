@@ -130,7 +130,7 @@ test('CP-to-customer options, uploads and conversion reject unauthenticated requ
 
 test('candidate sheet endpoints require authentication',async()=>{
   const id='0123456789abcdef01234567';
-  for(const [method,path] of [['GET','/state-candidates'],['GET','/state-candidates/template'],['POST','/state-candidates'],['PUT',`/state-candidates/${id}/file`],['GET',`/state-candidates/${id}/groups/${id}/preview`],['GET',`/state-candidates/${id}/groups/${id}/download`]])assert.equal((await fetch(`${baseUrl}/api/v1${path}`,{method})).status,401);
+  for(const [method,path] of [['GET','/state-candidates'],['GET','/state-candidates/template'],['POST','/state-candidates'],['PUT',`/state-candidates/${id}/file`],['GET',`/state-candidates/${id}/groups/${id}/preview`],['GET',`/state-candidates/${id}/groups/${id}/download`],['POST',`/state-candidates/${id}/groups/${id}/send-to-calling`]])assert.equal((await fetch(`${baseUrl}/api/v1${path}`,{method})).status,401);
 });
 
 test('bulk upload queue, retry and distribution settings require authentication', async () => {
@@ -164,5 +164,13 @@ test('customer review queues and replacement uploads require authentication', as
   for (const [method, path] of [['GET', '/customers/hold'], ['GET', '/customers/review-queue'], ['PUT', `/customers/${customer}/documents/${upload}/upload`], ['PATCH', `/customers/${customer}/documents/${upload}/verification`], ['PATCH', `/customers/${customer}/documents/${upload}/mis-verification`]]) {
     const response = await fetch(`${baseUrl}/api/v1${path}`, { method });
     assert.equal(response.status, 401, `${method} ${path}`);
+  }
+});
+
+
+test('self profile and image endpoints require authentication',async()=>{
+  const id='0123456789abcdef01234567';
+  for(const [method,path] of [['GET','/employees/me/profile'],['PATCH','/employees/me/profile'],['GET','/employees/me/profile-image-options'],['GET','/employees/me/profile-image-url'],['POST','/employees/me/profile-image-upload'],['PUT',`/employees/me/profile-image-upload/${id}`],['PATCH','/employees/me/profile-image']]){
+    const response=await fetch(`${baseUrl}/api/v1${path}`,{method});assert.equal(response.status,401);
   }
 });

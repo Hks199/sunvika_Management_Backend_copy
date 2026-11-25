@@ -6,10 +6,13 @@ import {createReadStream} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createInterface} from 'node:readline';
-import {Types} from 'mongoose';
+import mongoose,{Types} from 'mongoose';
 import {env} from '../../config/env.config.js';
 import {AppError} from '../../utils/app-error.util.js';
 import {logger} from '../../services/logger.service.js';
+import {CallingBatchModel} from '../calling-lists/calling-bulk.model.js';
+import {StateModel} from '../geography/models/state.model.js';
+import {DistrictModel} from '../geography/models/district.model.js';
 import {EmployeeModel} from '../employees/models/employee.model.js';
 import {RoleModel} from '../roles/models/role.model.js';
 import {checkCallingArchive,EXCEL_TYPE} from '../calling-lists/calling-list.excel.js';
@@ -39,8 +42,37 @@ export async function splitWorkbook(bytes:Buffer, dir:string){
 export const stateService={
  async reserve(actor:Types.ObjectId,input:{fileName:string;size:number}){if(!env.awsRegion||!env.awsCallingListBucketName)throw new AppError('Calling-list S3 storage is not configured',503);const id=new Types.ObjectId();await StateImportModel.create({_id:id,...input,owner:actor,bucket:env.awsCallingListBucketName,key:`calling-lists/state-imports/${id}/source.xlsx`,expiresAt:new Date(Date.now()+1800000)});return {_id:id};},
  async upload(id:string,bytes:Buffer){if(!Types.ObjectId.isValid(id))throw new AppError('Import not found',404);const job=await StateImportModel.findById(id).select('+bucket +key');if(!job)throw new AppError('Import not found',404);if(!Buffer.isBuffer(bytes)||bytes.length!==job.size||bytes.length<22||bytes.readUInt32LE(0)!==0x04034b50)throw new AppError('Upload the reserved .xlsx file',400);const claimed=await StateImportModel.updateOne({_id:id,state:'RESERVED',expiresAt:{$gt:new Date()}},{$set:{state:'UPLOADING',leaseUntil:new Date(Date.now()+1800000)}});if(!claimed.modifiedCount)throw new AppError('Upload expired or already started',409);try{await callingListStorage.put(job.bucket,job.key,bytes);await StateImportModel.updateOne({_id:id,state:'UPLOADING'},{$set:{state:'QUEUED'},$unset:{expiresAt:1,leaseUntil:1}});}catch(e){await StateImportModel.updateOne({_id:id,state:'UPLOADING'},{$set:{state:'RESERVED'}});throw e;}return {_id:id,state:'QUEUED'};},
- async list(){return StateImportModel.find().select('fileName state count error createdAt groups.sheetName groups.generatedAt groups.state groups.district groups.count groups.groupId').sort({createdAt:-1}).lean();},
+ async list(){return StateImportModel.find().select('fileName state count error createdAt groups.callingBatch groups.callingQueuedAt groups.sheetName groups.generatedAt groups.state groups.district groups.count groups.groupId').populate('groups.callingBatch','state error').sort({createdAt:-1}).lean();},
  async group(id:string,groupId:string){if(!Types.ObjectId.isValid(id)||!/^[a-f0-9]{24}$/.test(groupId))throw new AppError('Sheet not found',404);const job=await StateImportModel.findOne({_id:id,state:'READY'}).select('+bucket +groups.key').lean();const group=job?.groups.find(x=>x.groupId===groupId);if(!job||!group)throw new AppError('Sheet not found',404);return {job,group};},
+ async sendToCalling(actor:Types.ObjectId,id:string,groupId:string){
+  const {job,group}=await this.group(id,groupId);
+  if(group.callingBatch){
+   const batch=await CallingBatchModel.findById(group.callingBatch).select('state').lean();
+   if(!batch)throw new AppError('The linked calling batch is missing; contact support',409);
+   if(batch.state==='FAILED')await CallingBatchModel.updateOne({_id:batch._id,state:'FAILED'},{$set:{state:'QUEUED',error:''}});
+   return {batchId:batch._id,alreadyUploaded:true};
+  }
+  const state=await StateModel.findOne({normalizedName:group.state.trim().toLowerCase(),isActive:true}).select('_id').lean();
+  const district=state?await DistrictModel.findOne({normalizedName:group.district.trim().toLowerCase(),state:state._id,isActive:true}).select('_id').lean():null;
+  if(!state||!district)throw new AppError('This sheet state and district must be configured as active locations in Geography',400);
+  const bytes=await callingListStorage.read(job.bucket,group.key);
+  if(bytes.length<22||bytes.length>MAX_BULK_SIZE)throw new AppError('This sheet is larger than the 100 MB calling-list upload limit',400);
+  const batchId=new Types.ObjectId();
+  let result:{batchId:Types.ObjectId;alreadyUploaded:boolean}|undefined;
+  await mongoose.connection.transaction(async session=>{
+   const current=await StateImportModel.findOne({_id:job._id,state:'READY','groups.groupId':groupId}).select('groups.groupId groups.callingBatch').session(session).lean();
+   const currentGroup=current?.groups.find(item=>item.groupId===groupId);
+   if(!currentGroup)throw new AppError('Sheet not found',404);
+   if(currentGroup.callingBatch){result={batchId:currentGroup.callingBatch,alreadyUploaded:true};return;}
+   const marked=await StateImportModel.updateOne({_id:job._id,state:'READY',groups:{$elemMatch:{groupId,callingBatch:{$exists:false}}}},{$set:{'groups.$.callingBatch':batchId,'groups.$.callingQueuedAt':new Date()}},{session});
+   if(!marked.matchedCount)throw new AppError('Sheet is already being sent; refresh and try again',409);
+   const title=(group.sheetName??`Candidates-${group.groupId}`).slice(0,140);
+   await CallingBatchModel.create([{_id:batchId,title,fileName:`${title}.xlsx`,size:bytes.length,uploadedBy:actor,bucket:job.bucket,key:group.key,state:'QUEUED',allocationState:state._id,allocationDistrict:district._id}],{session});
+   result={batchId,alreadyUploaded:false};
+  });
+  if(!result)throw new AppError('Unable to queue this sheet',503);
+  return result;
+ },
  async download(id:string,groupId:string){const {job,group}=await this.group(id,groupId);return {url:await callingListStorage.download(job.bucket,group.key,`${group.sheetName ?? `${group.state}-${group.district}`}.xlsx`)};},
  async preview(id:string,groupId:string,page:number){const {job,group}=await this.group(id,groupId);const bytes=await callingListStorage.read(job.bucket,group.key);const reader=new ExcelJS.stream.xlsx.WorkbookReader(Readable.from(bytes),{worksheets:'emit',sharedStrings:'cache',styles:'cache',hyperlinks:'ignore',entries:'ignore'});Object.assign(reader,{model:{sheets:[]}});const rows:string[][]=[];let index=0;for await(const sheet of reader){for await(const row of sheet){if(row.number===1)continue;if(index++ >= (page-1)*50 && rows.length<50)rows.push(HEADERS.map((_,i)=>row.getCell(i+1).text));if(rows.length===50)break;}break;}return {headers:HEADERS,rows,total:group.count,page};}
 };
