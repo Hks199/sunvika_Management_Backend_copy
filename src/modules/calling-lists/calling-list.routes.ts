@@ -29,7 +29,7 @@ const route = (work: (req: express.Request, res: express.Response) => Promise<un
 const param = (value: unknown) => String(value ?? '');
 const batchAdministrator: RequestHandler = async(req,_res,next)=>{try{await assertCallingBatchAdministrator(req.auth!.employeeId);next();}catch(error){next(error);}};
 callingListRouter.use(['/batches','/distribution'],batchAdministrator);
-const bulkReserveSchema = Joi.object({allocationState:Joi.string().hex().length(24).required(),allocationDistrict:Joi.string().hex().length(24).required(),title:Joi.string().trim().min(1).max(140).required(),fileName:Joi.string().max(180).pattern(/^[^\\/\r\n]+\.xlsx$/i).required(),size:Joi.number().integer().min(22).max(MAX_BULK_SIZE).required()}).unknown(false);
+const bulkReserveSchema = Joi.object({allocationState:Joi.string().hex().length(24),allocationDistrict:Joi.string().hex().length(24),title:Joi.string().trim().min(1).max(140),fileName:Joi.string().max(180).pattern(/^[^\\/\r\n]+\.xlsx$/i).required(),size:Joi.number().integer().min(22).max(MAX_BULK_SIZE).required()}).and('allocationState','allocationDistrict').unknown(false);
 export const distributionSchema=Joi.object({enabled:Joi.boolean().strict().required(),skipUnfinished:Joi.boolean().strict().required()}).unknown(false);
 const languageSchema = Joi.string().trim().min(1).max(60);
 const languagesSchema = Joi.object({languages:Joi.array().items(languageSchema).max(100).unique((a,b)=>a.toLowerCase()===b.toLowerCase()).required()}).unknown(false);

@@ -67,7 +67,7 @@ export async function buildCallingListTemplate(): Promise<Buffer> {
   header.alignment = { vertical: 'middle' };
   sheet.autoFilter = { from: 'A1', to: 'E1' };
   sheet.getCell('B1').note = 'Required. Enter the mobile number as text, including country code if available.';
-  sheet.getCell('D1').note = 'Required. Enter the same state selected for the batch.';
-  sheet.getCell('E1').note = 'Required. Enter the same district selected for the batch.';
+  sheet.getCell('D1').note = 'Required. All rows in the workbook must use the same state.';
+  sheet.getCell('E1').note = 'Required. All rows in the workbook must use the same district.';
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }

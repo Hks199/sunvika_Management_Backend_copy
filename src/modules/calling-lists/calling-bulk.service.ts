@@ -39,12 +39,13 @@ export const callingBulkService = {
     }
     return { active: active ?? Boolean(employee?.callingAllocationActive), languages: languages ?? employee?.callingLanguages ?? [] };
   },
-  async reserve(actorId: Types.ObjectId, input: { title: string; fileName: string; size: number; allocationState:string; allocationDistrict:string }) {
+  async reserve(actorId: Types.ObjectId, input: { title?: string; fileName: string; size: number; allocationState?:string; allocationDistrict?:string }) {
     await assertCallingBatchAdministrator(actorId);
-    await geographyService.validateEmployeePlacement(input.allocationState,input.allocationDistrict);
+    if(input.allocationState&&input.allocationDistrict)await geographyService.validateEmployeePlacement(input.allocationState,input.allocationDistrict);
     if (!env.awsRegion || !env.awsCallingListBucketName) throw new AppError('Calling-list S3 storage is not configured', 503);
     const id = new Types.ObjectId();
-    const batch = await CallingBatchModel.create({ _id: id, ...input, uploadedBy: actorId, bucket: env.awsCallingListBucketName,
+    const title=input.fileName.replace(/\.xlsx$/i,'').slice(0,140).trim()||'Calling candidates';
+    const batch = await CallingBatchModel.create({ _id: id, ...input, title, uploadedBy: actorId, bucket: env.awsCallingListBucketName,
       key: `calling-lists/batches/${id}/source.xlsx`, expiresAt: new Date(Date.now() + 30 * 60_000) });
     return { _id: batch._id, expiresAt: batch.expiresAt };
   },
@@ -101,6 +102,7 @@ export async function processCallingBatch() {
   try {
     const bytes = await callingListStorage.read(batch.bucket,batch.key);
     let expectedLocation: {state:string;district:string}|undefined;
+    let allocationState=batch.allocationState,allocationDistrict=batch.allocationDistrict;
     if(batch.allocationState&&batch.allocationDistrict){
       const [state,district]=await Promise.all([StateModel.findById(batch.allocationState).select('name').lean(),DistrictModel.findOne({_id:batch.allocationDistrict,state:batch.allocationState}).select('name').lean()]);
       if(!state||!district)throw new AppError('Batch state or district is no longer available',400);
@@ -113,9 +115,17 @@ export async function processCallingBatch() {
       const lease = await CallingBatchModel.updateOne({_id:batch._id,state:'PROCESSING',leaseOwner:owner},{$set:{leaseUntil:new Date(Date.now()+20*60_000)}});
       if(!lease.matchedCount)throw new AppError('Batch processing lease expired',409);
       await callingListStorage.put(batch.bucket,key,workbook);
-      await CallingListModel.updateOne({_id:id,state:{$ne:'READY'}},{$set:{batch:batch._id,...(batch.allocationState&&batch.allocationDistrict?{allocationState:batch.allocationState,allocationDistrict:batch.allocationDistrict}:{}),part,title:`${batch.title} / ${part}`,fileName:partName,uploadedBy:batch.uploadedBy,bucket:batch.bucket,key,state:'STAGED',candidateStorage:'S3',headers,rowCount:rows.length,originalRowCount:rows.length,size:workbook.length}}, {upsert:true});
+      await CallingListModel.updateOne({_id:id,state:{$ne:'READY'}},{$set:{batch:batch._id,...(allocationState&&allocationDistrict?{allocationState,allocationDistrict}:{}),part,title:`${batch.title} / ${part}`,fileName:partName,uploadedBy:batch.uploadedBy,bucket:batch.bucket,key,state:'STAGED',candidateStorage:'S3',headers,rowCount:rows.length,originalRowCount:rows.length,size:workbook.length}}, {upsert:true});
       await CallingBatchModel.updateOne({_id:batch._id,leaseOwner:owner},{$set:{candidateCount:count,sheetCount:part}});
-    },expectedLocation);
+    },expectedLocation,async location=>{
+      const stateName=location.state.trim().toLowerCase(),districtName=location.district.trim().toLowerCase();
+      const state=await StateModel.findOne({normalizedName:stateName,isActive:true}).select('_id name').lean();
+      const district=state?await DistrictModel.findOne({normalizedName:districtName,state:state._id,isActive:true}).select('_id name').lean():null;
+      if(!state||!district)throw new AppError('The workbook state and district must match active locations configured in Geography',400);
+      allocationState=state._id;allocationDistrict=district._id;
+      const updated=await CallingBatchModel.updateOne({_id:batch._id,state:'PROCESSING',leaseOwner:owner},{$set:{allocationState,allocationDistrict}});
+      if(!updated.matchedCount)throw new AppError('Batch processing lease expired',409);
+    });
     await mongoose.connection.transaction(async session=>{
       const completed = await CallingBatchModel.updateOne({_id:batch._id,state:'PROCESSING',leaseOwner:owner},{$set:{state:'READY',...counts,completedAt:new Date()},$unset:{leaseOwner:1,leaseUntil:1}}, {session});
       if(!completed.modifiedCount)throw new AppError('Batch processing ownership changed',409);
