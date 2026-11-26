@@ -24,6 +24,7 @@ const employeeSchema = new Schema({
   isActive: { type: Boolean, default: true, index: true },
   callingLanguages: [{ type: String, trim: true, maxlength: 60 }],
   callingAllocationActive: { type: Boolean, default: false },
+  callingLocationExpiresAt: { type: Date },
   callingAllocationRevision: { type: Number, default: 0, select: false },
   isVerified: { type: Boolean, default: false },
   passwordHash: { type: String, select: false },

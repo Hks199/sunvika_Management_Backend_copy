@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import {callingAccess} from '../modules/calling-lists/calling-location.service.js';
 import { Types } from 'mongoose';
 import type { RequestHandler } from 'express';
 import { env } from '../config/env.config.js';
@@ -25,6 +26,9 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
     const session = await RefreshTokenModel.exists({ employee: claims.sub, familyId: claims.sid, revokedAt: null, expiresAt: { $gt: new Date() } });
     if (!session) throw new AppError('Session has been revoked', 401);
     req.auth = { employeeId: new Types.ObjectId(claims.sub), sessionId: claims.sid };
+    const path=req.originalUrl.split('?')[0] ?? '';
+    const exempt=path.endsWith('/auth/me')||path.endsWith('/auth/logout')||/\/calling-lists\/availability(?:\/(?:activate|location))?$/.test(path);
+    if(!exempt)await callingAccess(req.auth.employeeId);
     return next();
   } catch (error) {
     if (error instanceof AppError) return next(error);

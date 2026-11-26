@@ -2182,11 +2182,12 @@ test('calling allocation availability is RM-only and distribution selects availa
   t.mock.method(EmployeeModel,'updateOne',async(filter,update)=>{assert.equal(String(filter._id),String(actor));active=update.$set.callingAllocationActive;return {matchedCount:1};});
   t.mock.method(RoleModel,'findOne',filter=>query(filter.code==='RM'?(isRM?{_id:role}:null):{_id:role}));
   t.mock.method(EmployeeModel,'find',filter=>{selected=filter;return query([{_id:actor,address:{state:new Types.ObjectId(),district:new Types.ObjectId()}}]);});
+  t.mock.method(EmployeeModel,'updateMany',async()=>({modifiedCount:0}));
   t.mock.method(CallingDistributionSettingsModel,'findOne',()=>query({enabled:true,skipUnfinished:true}));
   t.mock.method(CallingAllocationModel,'exists',async()=>{checks++;return true;});
   t.mock.method(CallingListModel,'findOne',()=>{throw new Error('Already allocated RM must not receive a second sheet');});
   assert.deepEqual(await callingBulkService.availability(actor),{active:false,languages:[]});
-  assert.deepEqual(await callingBulkService.availability(actor,true),{active:true,languages:[]});
+  await assert.rejects(callingBulkService.availability(actor,true),e=>e.statusCode===400);
   assert.deepEqual(await callingBulkService.availability(actor,false),{active:false,languages:[]});
   isRM=false;await assert.rejects(callingBulkService.availability(actor,true),e=>e.statusCode===403);
   isRM=true;await distributeDailyCallingSheets(new Date('2026-11-13T00:00:00Z'));
@@ -2198,6 +2199,7 @@ test('calling sheets match each RM state and district, and missing matches do no
  const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');const {CallingDistributionSettingsModel,CallingAllocationModel}=await import('../dist/modules/calling-lists/calling-bulk.model.js');const {CallingListModel}=await import('../dist/modules/calling-lists/calling-list.model.js');
  const role=new Types.ObjectId(),state=new Types.ObjectId(),district1=new Types.ObjectId(),district2=new Types.ObjectId(),actor=new Types.ObjectId(),other=new Types.ObjectId(),seen=[];
  const query=value=>({select(){return this;},sort(){return this;},lean:async()=>value});
+ t.mock.method(EmployeeModel,'updateMany',async()=>({modifiedCount:0}));
  t.mock.method(RoleModel,'findOne',()=>query({_id:role}));t.mock.method(EmployeeModel,'find',()=>query([{_id:actor,address:{state,district:district1}},{_id:other,address:{state,district:district2}},{_id:new Types.ObjectId(),address:{}}]));t.mock.method(CallingDistributionSettingsModel,'findOne',()=>query({enabled:true}));t.mock.method(CallingAllocationModel,'exists',async()=>false);t.mock.method(CallingListModel,'findOne',filter=>{seen.push(filter);return query(null);});
  await distributeDailyCallingSheets(new Date('2026-11-13T00:00:00Z'));assert.equal(seen.length,2);assert.ok(seen.every(x=>String(x.allocationState)===String(state)));assert.deepEqual(new Set(seen.map(x=>String(x.allocationDistrict))),new Set([String(district1),String(district2)]));
 });
@@ -2261,4 +2263,23 @@ test('candidate sheet transfer queues one calling batch and retries failure with
 test('CP quotation permissions are granted idempotently without quotation sharing',async t=>{
  const {Types}=await import('mongoose');const {grantCpQuotationAccess}=await import('../dist/modules/roles/services/role.service.js');const {PermissionModel}=await import('../dist/modules/roles/models/permission.model.js');const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');const ids={'quotations.create':new Types.ObjectId(),'quotations.read':new Types.ObjectId()};const assigned=new Set(),requested=[];let updates=0;
  t.mock.method(PermissionModel,'findOneAndUpdate',async filter=>{requested.push(filter.code);assert.ok(ids[filter.code]);return {_id:ids[filter.code]};});t.mock.method(RoleModel,'updateOne',async(filter,update)=>{assert.equal(filter.code,'CP');const id=String(update.$addToSet.permissions);assert.equal(String(filter.permissions.$ne),id);assert.equal(update.$inc.permissionVersion,1);const added=!assigned.has(id);assigned.add(id);if(added)updates++;return {modifiedCount:added?1:0};});await grantCpQuotationAccess();await grantCpQuotationAccess();assert.equal(updates,2);assert.deepEqual(new Set(requested),new Set(['quotations.create','quotations.read']));assert.equal(assigned.size,2);
+});
+
+
+test('RM GPS activation requires a precise fix inside the allowed radius and blocks inactive data access',async t=>{
+ const {Types}=await import('mongoose');
+ const {checkLocation,callingAccess,distanceMeters,CallingLocationSettings}=await import('../dist/modules/calling-lists/calling-location.service.js');
+ const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');
+ const actor=new Types.ObjectId(),role=new Types.ObjectId();let active=false,expires;
+ const query=v=>({select(){return this},lean:async()=>v});
+ t.mock.method(EmployeeModel,'findOne',()=>query({role,callingAllocationActive:active,callingLocationExpiresAt:expires}));
+ t.mock.method(RoleModel,'findOne',()=>query({code:'RM'}));
+ t.mock.method(CallingLocationSettings,'findOne',()=>query(null));
+ t.mock.method(EmployeeModel,'updateOne',async(_filter,update)=>{active=update.$set.callingAllocationActive;expires=update.$set.callingLocationExpiresAt;return {matchedCount:1}});
+ assert.equal(distanceMeters(21.230612454334352,81.6397069242302,21.230612454334352,81.6397069242302),0);
+ await assert.rejects(callingAccess(actor),e=>e.statusCode===403);
+ await assert.rejects(checkLocation(actor,{latitude:21.230612454334352,longitude:81.6397069242302,accuracy:25},true),e=>e.statusCode===403);
+ await assert.rejects(checkLocation(actor,{latitude:21.24,longitude:81.6397069242302,accuracy:3},true),e=>e.statusCode===403);
+ const result=await checkLocation(actor,{latitude:21.230612454334352,longitude:81.6397069242302,accuracy:3},true);assert.equal(result.active,true);await callingAccess(actor);
+ expires=new Date(0);await assert.rejects(callingAccess(actor),e=>e.statusCode===403);assert.equal(active,false);
 });

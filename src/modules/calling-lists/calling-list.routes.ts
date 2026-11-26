@@ -1,4 +1,6 @@
 import express, { Router, type RequestHandler } from 'express';
+import {callingAccess,checkLocation,locationSettings,CallingLocationSettings} from './calling-location.service.js';
+import {EmployeeModel} from '../employees/models/employee.model.js';
 import Joi from 'joi';
 import { authenticate } from '../../middleware/authenticate.middleware.js';
 import { requirePermission, requireManagingDirector } from '../../middleware/authorize.middleware.js';
@@ -36,9 +38,16 @@ const languagesSchema = Joi.object({languages:Joi.array().items(languageSchema).
 callingListRouter.get('/languages',route(async(_req,res)=>sendSuccess(res,'Calling languages',await callingBulkService.languages())));
 callingListRouter.patch('/languages',requireManagingDirector,validateBody(languagesSchema),route(async(req,res)=>sendSuccess(res,'Calling languages saved',await callingBulkService.saveLanguages(req.body.languages))));
 callingListRouter.patch('/availability/languages',validateBody(languagesSchema),route(async(req,res)=>sendSuccess(res,'RM languages saved',await callingBulkService.availability(req.auth!.employeeId,undefined,req.body.languages))));
+const locationSchema=Joi.object({latitude:Joi.number().min(-90).max(90).required(),longitude:Joi.number().min(-180).max(180).required(),accuracy:Joi.number().min(0).max(100000).required()}).unknown(false);
+const locationSettingsSchema=Joi.object({latitude:Joi.number().min(-90).max(90).required(),longitude:Joi.number().min(-180).max(180).required(),radiusMeters:Joi.number().min(1).max(100000).required(),frequencyMinutes:Joi.number().integer().min(1).max(60).required()}).unknown(false);
+callingListRouter.get('/location-settings',requireManagingDirector,route(async(_req,res)=>sendSuccess(res,'Calling location settings',await locationSettings())));
+callingListRouter.patch('/location-settings',requireManagingDirector,validateBody(locationSettingsSchema),route(async(req,res)=>{await CallingLocationSettings.findOneAndUpdate({key:'default'},{$set:{...req.body,updatedBy:req.auth!.employeeId}},{upsert:true,new:true,runValidators:true});await EmployeeModel.updateMany({callingAllocationActive:true},{$set:{callingAllocationActive:false},$unset:{callingLocationExpiresAt:1}});return sendSuccess(res,'Location settings saved. RMs must activate again.',await locationSettings());}));
+callingListRouter.post('/availability/activate',validateBody(locationSchema),route(async(req,res)=>sendSuccess(res,'Availability activated',await checkLocation(req.auth!.employeeId,req.body,true))));
+callingListRouter.post('/availability/location',validateBody(locationSchema),route(async(req,res)=>sendSuccess(res,'Location checked',await checkLocation(req.auth!.employeeId,req.body,false))));
 const availabilitySchema = Joi.object({active:Joi.boolean().strict().required()}).unknown(false);
-callingListRouter.get('/availability',route(async(req,res)=>sendSuccess(res,'Calling allocation availability',await callingBulkService.availability(req.auth!.employeeId))));
+callingListRouter.get('/availability',route(async(req,res)=>sendSuccess(res,'Calling allocation availability',{...await callingBulkService.availability(req.auth!.employeeId),frequencyMinutes:(await locationSettings()).frequencyMinutes})));
 callingListRouter.patch('/availability',validateBody(availabilitySchema),route(async(req,res)=>sendSuccess(res,'Calling allocation availability saved',await callingBulkService.availability(req.auth!.employeeId,req.body.active))));
+callingListRouter.use(async(req,_res,next)=>{try{await callingAccess(req.auth!.employeeId);next();}catch(error){next(error);}});
 callingListRouter.get('/distribution',route(async(req,res)=>sendSuccess(res,'Daily distribution settings',await callingBulkService.settings(req.auth!.employeeId))));
 callingListRouter.patch('/distribution',validateBody(distributionSchema),route(async(req,res)=>sendSuccess(res,'Distribution settings saved',await callingBulkService.saveSettings(req.auth!.employeeId,req.body))));
 callingListRouter.get('/batches',validateQuery(pageSchema),route(async(req,res)=>{const q=res.locals.validatedQuery;return sendSuccess(res,'Upload batches',await callingBulkService.list(req.auth!.employeeId,q.page,q.limit));}));

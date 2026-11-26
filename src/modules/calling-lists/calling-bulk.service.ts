@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { expireCallingLocations } from './calling-location.service.js';
 import mongoose, { Types } from 'mongoose';
 import { env } from '../../config/env.config.js';
 import { AppError } from '../../utils/app-error.util.js';
@@ -28,9 +29,11 @@ export const callingBulkService = {
   async languages() { return (await CallingLanguageOptionsModel.findOne({key:'default'}).lean())?.languages ?? []; },
   async saveLanguages(languages:string[]) { const saved=await CallingLanguageOptionsModel.findOneAndUpdate({key:'default'},{$set:{languages}},{upsert:true,new:true,runValidators:true});return saved.languages; },
   async availability(actorId: Types.ObjectId, active?: boolean, languages?: string[]) {
-    const employee = await EmployeeModel.findOne({ _id: actorId, isActive: true }).select('role callingAllocationActive callingLanguages').lean();
+    const employee = await EmployeeModel.findOne({ _id: actorId, isActive: true }).select('role callingAllocationActive callingLocationExpiresAt callingLanguages').lean();
     const role = employee ? await RoleModel.findOne({ _id: employee.role, code: 'RM', isActive: true }).select('_id').lean() : null;
     if (!role) throw new AppError('Only an active RM can change calling allocation availability', 403);
+    if(active===true)throw new AppError('A GPS location check is required to activate',400);
+    if(employee?.callingAllocationActive&&(!employee.callingLocationExpiresAt||employee.callingLocationExpiresAt<=new Date())){await EmployeeModel.updateOne({_id:actorId},{$set:{callingAllocationActive:false},$unset:{callingLocationExpiresAt:1}});employee.callingAllocationActive=false;}
     const allowedLanguages=languages ? await this.languages() : [];
     if (languages && languages.some(language=>!(allowedLanguages.includes(language)))) throw new AppError('Select languages configured by MD',400);
     if (active !== undefined || languages !== undefined) {
@@ -140,11 +143,12 @@ export async function processCallingBatch() {
 
 /** Unique (IST day, RM, slot) allocations make retries and multiple API instances safe. */
 export async function distributeDailyCallingSheets(now = new Date()) {
+  await expireCallingLocations();
   const {day,due}=dailyDistributionTime(now); if(!due)return;
   const settings = await CallingDistributionSettingsModel.findOne({key:'daily'}).lean();
   if(settings?.enabled===false)return;
   const role=await RoleModel.findOne({code:'RM',isActive:true}).select('_id').lean();if(!role)return;
-  const rms=await EmployeeModel.find({role:role._id,isActive:true,callingAllocationActive:true}).select('_id address.state address.district').sort({employeeCode:1}).lean();
+  const rms=await EmployeeModel.find({role:role._id,isActive:true,callingAllocationActive:true,callingLocationExpiresAt:{$gt:now}}).select('_id address.state address.district').sort({employeeCode:1}).lean();
   // Rotate the first recipient daily so a small remaining pool is not always given to the same RMs.
   const offset=rms.length?Math.floor(Date.parse(day)/86400_000)%rms.length:0;
   const ordered=[...rms.slice(offset),...rms.slice(0,offset)];

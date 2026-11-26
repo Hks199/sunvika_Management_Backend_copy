@@ -19,7 +19,7 @@ export async function assignStoredCallingSheet(listId: Types.ObjectId, rmId: Typ
     if (automatic) {
       if (indiaDay(new Date()) !== automatic.day) throw new AppError('Allocation day changed; retry', 409);
       if (!list.allocationState || !list.allocationDistrict) throw new AppError('Sheet state and district are missing', 409);
-      const available = await EmployeeModel.updateOne({ _id: rmId, role: role._id, isActive: true, callingAllocationActive: true, 'address.state': list.allocationState, 'address.district': list.allocationDistrict }, { $inc: { callingAllocationRevision: 1 } }, { session });
+      const available = await EmployeeModel.updateOne({ _id: rmId, role: role._id, isActive: true, callingAllocationActive: true, callingLocationExpiresAt: {$gt:new Date()}, 'address.state': list.allocationState, 'address.district': list.allocationDistrict }, { $inc: { callingAllocationRevision: 1 } }, { session });
       if (!available.matchedCount) throw new AppError('RM is not available for automatic allocation', 409);
     } else if (!await EmployeeModel.exists({ _id: rmId, role: role._id, isActive: true }).session(session)) throw new AppError('Select an active RM', 400);
     const claimed = await CallingListModel.updateOne({ _id: listId, state: 'READY', candidateStorage: 'S3', assignedTo: null, busy: false, ...(automatic ? {allocationState:list.allocationState,allocationDistrict:list.allocationDistrict} : {}) }, {
