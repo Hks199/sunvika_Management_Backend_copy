@@ -1,4 +1,5 @@
 import Joi from 'joi';
+import {cpIdentityDocumentService} from '../services/cp-identity-document.service.js';
 import { EmployeeModel } from '../models/employee.model.js';
 import { profileImageService } from '../services/profile-image.service.js';
 import { AppError } from '../../../utils/app-error.util.js';
@@ -58,6 +59,10 @@ employeeRouter.put('/profile-image-upload/:uploadId', requirePermission('employe
   limit: env.profileImageMaxSizeBytes
 }), controller.uploadProfileImage);
 employeeRouter.post('/profile-image-upload-url', requirePermission('employees.create'), validateBody(createProfileImageUploadSchema), controller.createProfileImageUpload);
+employeeRouter.get('/:employeeId/identity-documents',async(req,res,next)=>{try{res.set('Cache-Control','private, no-store');return sendSuccess(res,'CP identity documents',await cpIdentityDocumentService.list(req.auth!.employeeId,String(req.params.employeeId)));}catch(error){return next(error);}});
+employeeRouter.put('/:employeeId/identity-documents/:documentType',express.raw({type:['application/pdf','image/jpeg','image/png','image/webp'],limit:env.customerDocumentMaxSizeBytes}),async(req,res,next)=>{try{return sendSuccess(res,'CP identity document saved',await cpIdentityDocumentService.upload(req.auth!.employeeId,String(req.params.employeeId),String(req.params.documentType),req.get('Content-Type')??'',req.body));}catch(error){return next(error);}});
+employeeRouter.get('/:employeeId/identity-documents/:documentType/preview-url',async(req,res,next)=>{try{res.set('Cache-Control','private, no-store');return sendSuccess(res,'CP identity document preview',await cpIdentityDocumentService.download(req.auth!.employeeId,String(req.params.employeeId),String(req.params.documentType),true));}catch(error){return next(error);}});
+employeeRouter.get('/:employeeId/identity-documents/:documentType/download-url',async(req,res,next)=>{try{res.set('Cache-Control','private, no-store');return sendSuccess(res,'CP identity document download',await cpIdentityDocumentService.download(req.auth!.employeeId,String(req.params.employeeId),String(req.params.documentType)));}catch(error){return next(error);}});
 employeeRouter.get('/:employeeId/profile-image-options', requirePermission('employees.read'), async(req,res,next)=>{try{return sendSuccess(res,'Profile image options',await employeeProfileImageService.options(req.auth!.employeeId,String(req.params.employeeId)));}catch(error){return next(error);}});
 const canEditProfile:express.RequestHandler=async(req,_res,next)=>{try{await employeeProfileImageService.assertEdit(req.auth!.employeeId,String(req.params.employeeId));next();}catch(error){return next(error);}};
 employeeRouter.post('/:employeeId/profile-image-upload',requirePermission('employees.update'),canEditProfile,validateBody(createProfileImageUploadSchema),controller.createProfileImageUploadReservation);

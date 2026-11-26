@@ -2283,3 +2283,31 @@ test('RM GPS activation requires a precise fix inside the allowed radius and blo
  const result=await checkLocation(actor,{latitude:21.230612454334352,longitude:81.6397069242302,accuracy:3},true);assert.equal(result.active,true);await callingAccess(actor);
  expires=new Date(0);await assert.rejects(callingAccess(actor),e=>e.statusCode===403);assert.equal(active,false);
 });
+
+
+test('CP identity document type checks reject content disguised as PDF or image',async()=>{
+ const {validIdentityBytes}=await import('../dist/modules/employees/services/cp-identity-document.service.js');
+ assert.equal(validIdentityBytes('application/pdf',Buffer.from('%PDF-1.7')),true);
+ assert.equal(validIdentityBytes('application/pdf',Buffer.from('<html>')),false);
+ assert.equal(validIdentityBytes('image/png',Buffer.from([137,80,78,71,13,10,26,10])),true);
+ assert.equal(validIdentityBytes('image/jpeg',Buffer.from('not a jpeg')),false);
+});
+
+
+test('CP identity document access rejects targets outside the employee hierarchy',async t=>{
+ const {Types}=await import('mongoose');const {cpIdentityDocumentService}=await import('../dist/modules/employees/services/cp-identity-document.service.js');
+ const {roleService}=await import('../dist/modules/roles/services/role.service.js');const {hierarchyService}=await import('../dist/modules/employees/services/hierarchy.service.js');
+ t.mock.method(roleService,'hasPermission',async()=>true);t.mock.method(hierarchyService,'canAccessEmployee',async()=>false);
+ const actor=new Types.ObjectId(),target=new Types.ObjectId().toString();
+ await assert.rejects(cpIdentityDocumentService.list(actor,target),e=>e.statusCode===404);
+ await assert.rejects(cpIdentityDocumentService.upload(actor,target,'PAN','application/pdf',Buffer.from('%PDF-1.7')),e=>e.statusCode===404);
+ await assert.rejects(cpIdentityDocumentService.download(actor,target,'PAN'),e=>e.statusCode===404);
+});
+
+
+test('CP passport photo rejects PDF uploads',async t=>{
+ const {Types}=await import('mongoose');const {cpIdentityDocumentService}=await import('../dist/modules/employees/services/cp-identity-document.service.js');
+ const {roleService}=await import('../dist/modules/roles/services/role.service.js');const {hierarchyService}=await import('../dist/modules/employees/services/hierarchy.service.js');const {EmployeeModel}=await import('../dist/modules/employees/models/employee.model.js');const {RoleModel}=await import('../dist/modules/roles/models/role.model.js');
+ t.mock.method(roleService,'hasPermission',async()=>true);t.mock.method(hierarchyService,'canAccessEmployee',async()=>true);t.mock.method(EmployeeModel,'findById',()=>({select(){return this},lean:async()=>({role:new Types.ObjectId()})}));t.mock.method(RoleModel,'exists',async()=>true);
+ await assert.rejects(cpIdentityDocumentService.upload(new Types.ObjectId(),new Types.ObjectId().toString(),'PHOTO','application/pdf',Buffer.from('%PDF-1.7')),e=>e.statusCode===400);
+});

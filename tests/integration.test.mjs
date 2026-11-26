@@ -174,3 +174,12 @@ test('self profile and image endpoints require authentication',async()=>{
     const response=await fetch(`${baseUrl}/api/v1${path}`,{method});assert.equal(response.status,401);
   }
 });
+
+
+test('CP identity document endpoints require authentication',async()=>{
+ const id='0123456789abcdef01234567';
+ for(const [method,path] of [['GET',`/employees/${id}/identity-documents`],['PUT',`/employees/${id}/identity-documents/AADHAAR`],['GET',`/employees/${id}/identity-documents/PAN/download-url`]]){const response=await fetch(`${baseUrl}/api/v1${path}`,{method});assert.equal(response.status,401);}
+});
+
+
+test('CP passport photo preview requires authentication',async()=>{const id='0123456789abcdef01234567';const response=await fetch(`${baseUrl}/api/v1/employees/${id}/identity-documents/PHOTO/preview-url`);assert.equal(response.status,401);});
