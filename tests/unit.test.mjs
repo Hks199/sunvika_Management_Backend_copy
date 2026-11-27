@@ -2311,3 +2311,24 @@ test('CP passport photo rejects PDF uploads',async t=>{
  t.mock.method(roleService,'hasPermission',async()=>true);t.mock.method(hierarchyService,'canAccessEmployee',async()=>true);t.mock.method(EmployeeModel,'findById',()=>({select(){return this},lean:async()=>({role:new Types.ObjectId()})}));t.mock.method(RoleModel,'exists',async()=>true);
  await assert.rejects(cpIdentityDocumentService.upload(new Types.ObjectId(),new Types.ObjectId().toString(),'PHOTO','application/pdf',Buffer.from('%PDF-1.7')),e=>e.statusCode===400);
 });
+
+
+test('CP customer conversion copies saved identity documents and checks missing uploads',async t=>{
+ const {Types}=await import('mongoose');const {S3Client,CopyObjectCommand}=await import('@aws-sdk/client-s3');
+ const {customerDocumentService}=await import('../dist/modules/customers/services/customer-document.service.js');
+ const {env}=await import('../dist/config/env.config.js');if(!env.awsRegion||!env.awsCustomerDocumentBucketName){t.skip('S3 settings are required for the mocked copy test');return;}
+ const {CustomerDocumentUploadModel}=await import('../dist/modules/customers/models/customer-document-upload.model.js');const {CpIdentityDocumentModel}=await import('../dist/modules/employees/services/cp-identity-document.service.js');
+ const actor=new Types.ObjectId(),cp=new Types.ObjectId(),id1=new Types.ObjectId().toString(),id2=new Types.ObjectId().toString();
+ let supplied=[{documentType:'ELECTRICITY_BILL'},{documentType:'BANK_PASSBOOK'}],saved=[{type:'PAN',key:'cp-identity-documents/pan.pdf',mimeType:'application/pdf',size:10},{type:'AADHAAR',key:'cp-identity-documents/aadhaar.png',mimeType:'image/png',size:12}],commands=[];
+ t.mock.method(CustomerDocumentUploadModel,'find',async()=>supplied);t.mock.method(CpIdentityDocumentModel,'find',()=>({select(){return this},lean:async()=>saved}));t.mock.method(CustomerDocumentUploadModel,'create',async data=>({...data,_id:new Types.ObjectId()}));t.mock.method(S3Client.prototype,'send',async command=>{commands.push(command);return {}});
+ const copies=await customerDocumentService.copyCpDocumentsForConversion(actor,cp,[id1,id2]);assert.deepEqual(copies.map(d=>d.documentType).sort(),['AADHAAR','PAN']);assert.equal(commands.length,2);assert.ok(commands.every(c=>c instanceof CopyObjectCommand&&c.input.Key.startsWith('customer-document-staging/')&&c.input.ServerSideEncryption==='AES256'));
+ supplied=[{documentType:'ELECTRICITY_BILL'},{documentType:'BANK_PASSBOOK'},{documentType:'PAN'}];commands=[];const one=await customerDocumentService.copyCpDocumentsForConversion(actor,cp,[id1,id2,new Types.ObjectId().toString()]);assert.deepEqual(one.map(d=>d.documentType),['AADHAAR']);assert.equal(commands.length,1);
+ saved=[];supplied=[{documentType:'ELECTRICITY_BILL'},{documentType:'BANK_PASSBOOK'}];await assert.rejects(customerDocumentService.copyCpDocumentsForConversion(actor,cp,[id1,id2]),e=>e.statusCode===400);
+ await assert.rejects(customerDocumentService.copyCpDocumentsForConversion(actor,cp,[id1,id1]),e=>e.statusCode===400);
+});
+
+test('CP conversion allows only missing document reservations without weakening lead conversion',async()=>{
+ const {createCpCustomerUploadsSchema,createLeadConversionUploadsSchema}=await import('../dist/modules/customers/validations/customer.validation.js');
+ const doc=type=>({documentType:type,fileName:'document.pdf',mimeType:'application/pdf',fileSize:20});const missing=[doc('ELECTRICITY_BILL'),doc('BANK_PASSBOOK')];
+ assert.equal(createCpCustomerUploadsSchema.validate({documents:missing}).error,undefined);assert.ok(createCpCustomerUploadsSchema.validate({documents:[doc('PAN'),doc('PAN')]}).error);assert.ok(createLeadConversionUploadsSchema.validate({documents:missing}).error);
+});

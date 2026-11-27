@@ -1,10 +1,11 @@
 import { CustomerModel } from '../models/customer.model.js';
+import { CpIdentityDocumentModel } from '../../employees/services/cp-identity-document.service.js';
 import { reviewActor, currentDocuments, reviewComplete } from './customer-review.service.js';
 import { EmployeeModel } from '../../employees/models/employee.model.js';
 import { canAccessAssignedLead } from '../../leads/services/lead-assignment-access.js';
 import { assertCpCustomerAccess } from './cp-customer-access.service.js';
 import { randomUUID } from 'node:crypto';
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { CopyObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Types, type ClientSession } from 'mongoose';
 import { env } from '../../../config/env.config.js';
@@ -66,7 +67,7 @@ export const customerDocumentService = {
   async createLeadConversionUploadUrls(actorId: Types.ObjectId, leadId: string, documents: Array<{ documentType: CustomerDocumentType; fileName: string; mimeType: string; fileSize: number }>, subject: 'lead' | 'cp' = 'lead') {
     const scope = await conversionSubject(actorId, leadId, subject);
     const requiredTypes = requiredConversionTypes(subject);
-    if (documents.length !== requiredTypes.length || new Set(documents.map(({ documentType }) => documentType)).size !== requiredTypes.length || requiredTypes.some((type) => !documents.some((document) => document.documentType === type))) {
+    if ((subject === 'lead' && (documents.length !== requiredTypes.length || requiredTypes.some(type => !documents.some(document => document.documentType === type)))) || !documents.length || new Set(documents.map(({ documentType }) => documentType)).size !== documents.length || documents.some(document => !requiredTypes.includes(document.documentType))) {
       throw new AppError('Upload exactly one of each required customer document: PAN, AADHAAR, ELECTRICITY_BILL, BANK_PASSBOOK, and a geotag photo when required', 400);
     }
     for (const input of documents) {
@@ -153,6 +154,32 @@ export const customerDocumentService = {
       if (errorCode === 'NoSuchBucket') throw new AppError('The configured customer document bucket does not exist. Check AWS_S3_CUSTOMER_DOCUMENT_BUCKET or AWS_S3_BUCKET_NAME.', 503);
       throw new AppError(`Customer document upload failed in storage (${errorCode}). Check backend logs and retry with a new upload.`, 503);
     }
+  },
+  async copyCpDocumentsForConversion(actorId:Types.ObjectId,cpId:Types.ObjectId,uploadIds:string[]) {
+    if(uploadIds.some(id=>!Types.ObjectId.isValid(id))||new Set(uploadIds).size!==uploadIds.length)throw new AppError('Invalid document uploads',400);
+    const supplied=await CustomerDocumentUploadModel.find({_id:{$in:uploadIds},cpEmployee:cpId,owner:actorId,status:'PENDING',uploadedAt:{$ne:null},expiresAt:{$gt:new Date()}});
+    const suppliedTypes=new Set(supplied.map(doc=>doc.documentType));
+    if(supplied.length!==uploadIds.length||suppliedTypes.size!==supplied.length||supplied.some(doc=>!requiredConversionTypes('cp').includes(doc.documentType as CustomerDocumentType)))throw new AppError('Document uploads are invalid or expired',400);
+    const saved=await CpIdentityDocumentModel.find({cp:cpId,type:{$in:['PAN','AADHAAR']}}).select('+key').lean();
+    const toCopy=saved.filter(doc=>(doc.type==='PAN'||doc.type==='AADHAAR')&&!suppliedTypes.has(doc.type as CustomerDocumentType));
+    const available=new Set([...suppliedTypes,...toCopy.map(doc=>doc.type)]);
+    if(requiredConversionTypes('cp').some(type=>!available.has(type)))throw new AppError('Required documents changed or are missing. Reload the form and try again.',400);
+    const created:Array<InstanceType<typeof CustomerDocumentUploadModel>>=[];const keys:string[]=[];
+    try{
+      for(const doc of toCopy){
+        const ext=MIME_EXTENSIONS.get(doc.mimeType);if(!ext)throw new AppError('Saved document type is invalid',400);
+        const key=`customer-document-staging/${cpId}/${randomUUID()}.${ext}`;
+        const source=[env.awsCustomerDocumentBucketName,...doc.key.split('/')].map(encodeURIComponent).join('/');
+        await storage().send(new CopyObjectCommand({Bucket:env.awsCustomerDocumentBucketName,Key:key,CopySource:source,MetadataDirective:'REPLACE',ContentType:doc.mimeType,ServerSideEncryption:'AES256'}));keys.push(key);
+        const record=await CustomerDocumentUploadModel.create({cpEmployee:cpId,owner:actorId,documentType:doc.type,fileName:`${doc.type}.${ext}`,key,contentType:doc.mimeType,size:doc.size,uploadedAt:new Date(),expiresAt:new Date(Date.now()+UPLOAD_TTL_SECONDS*1000),status:'PENDING'});created.push(record);
+      }
+      return created;
+    }catch(error){await CustomerDocumentUploadModel.updateMany({_id:{$in:created.map(doc=>doc._id)}},{$set:{status:'REVOKED'}});await Promise.all(keys.map(key=>storage().send(new DeleteObjectCommand({Bucket:env.awsCustomerDocumentBucketName,Key:key})).catch(()=>{})));throw error;}
+  },
+  async discardCopiedCpDocuments(uploads:Array<InstanceType<typeof CustomerDocumentUploadModel>>) {
+    if(!uploads.length)return;
+    await CustomerDocumentUploadModel.updateMany({_id:{$in:uploads.map(doc=>doc._id)},status:{$ne:'COMPLETED'}},{$set:{status:'REVOKED'}});
+    await Promise.all(uploads.map(doc=>storage().send(new DeleteObjectCommand({Bucket:env.awsCustomerDocumentBucketName,Key:doc.key})).catch(()=>{})));
   },
   async prepareLeadConversionUploads(actorId: Types.ObjectId, leadId: Types.ObjectId, uploadIds: string[], subject: 'lead' | 'cp' = 'lead') {
     const scope = subject === 'cp' ? { cpEmployee: leadId } : { lead: leadId };

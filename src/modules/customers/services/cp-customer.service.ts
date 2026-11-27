@@ -3,6 +3,7 @@ import mongoose, { Types } from 'mongoose';
 import Joi from 'joi';
 import { AppError } from '../../../utils/app-error.util.js';
 import { EmployeeModel } from '../../employees/models/employee.model.js';
+import { CpIdentityDocumentModel } from '../../employees/services/cp-identity-document.service.js';
 import { withHierarchyLock } from '../../employees/services/employee.service.js';
 import { geographyService } from '../../geography/services/geography.service.js';
 import { createLeadSchema } from '../../leads/validations/lead.validation.js';
@@ -16,7 +17,7 @@ import { assertCpCustomerAccess } from './cp-customer-access.service.js';
 
 export const cpCustomerSchema = createLeadSchema.concat(convertLeadSchema)
   .fork(['requiredCapacityKW', 'ratePerKW', 'paymentMode', 'panelBrand', 'panelTechnology'], field => field.required())
-  .keys({ documentUploadIds: Joi.array().items(Joi.string().hex().length(24).required()).length(4).unique().required(), requiredCapacityKW: Joi.number().min(0.1).max(100000).required(), confirmed: Joi.boolean().valid(true).strict().required() });
+  .keys({ documentUploadIds: Joi.array().items(Joi.string().hex().length(24).required()).max(4).unique().required(), requiredCapacityKW: Joi.number().min(0.1).max(100000).required(), confirmed: Joi.boolean().valid(true).strict().required() });
 interface ConversionInput {
   customerName: string; mobileNumber: string; alternateNumber?: string; branch: string; state: string; district: string;
   blockOrTehsil?: string; siteAddress: string; requiredCapacityKW: number; ratePerKW: number; paymentMode: string;
@@ -25,7 +26,8 @@ interface ConversionInput {
 export const cpCustomerService = {
   async options(actorId: Types.ObjectId, cpId: string) {
     const cp = await assertCpCustomerAccess(actorId, cpId);
-    return { customerId: cp.sourceCustomer ?? null, defaults: {
+    const documents=await CpIdentityDocumentModel.find({cp:cp._id,type:{$in:['PAN','AADHAAR']}}).select('type').lean();
+    return { customerId: cp.sourceCustomer ?? null, existingDocuments:documents.map(document=>document.type), defaults: {
       customerName: [cp.firstName, cp.middleName, cp.lastName].filter(Boolean).join(' '), mobileNumber: cp.mobileNumber,
       siteAddress: cp.address?.addressLine ?? '', state: cp.address?.state ? String(cp.address.state) : '',
       district: cp.address?.district ? String(cp.address.district) : '', branch: cp.branch ? String(cp.branch) : ''
@@ -39,9 +41,11 @@ export const cpCustomerService = {
       // Also protect records linked in the opposite direction by historical conversions.
       if (await CustomerModel.exists({ cpEmployee: cp._id })) throw new AppError('This CP already has a linked customer. Reload its details.', 409);
       await geographyService.validateEmployeePlacement(input.state, input.district, input.branch);
-      const uploads = await customerDocumentService.prepareLeadConversionUploads(actorId, cp._id, input.documentUploadIds, 'cp');
+      const copied = await customerDocumentService.copyCpDocumentsForConversion(actorId, cp._id, input.documentUploadIds);
+      let uploads: Awaited<ReturnType<typeof customerDocumentService.prepareLeadConversionUploads>> = [];
       const customerId = new Types.ObjectId();
       try {
+        uploads = await customerDocumentService.prepareLeadConversionUploads(actorId, cp._id, [...input.documentUploadIds,...copied.map(doc=>String(doc._id))], 'cp');
         await mongoose.connection.transaction(async session => {
           // Claim this CP atomically: concurrent requests cannot create a second customer.
           const claimed = await EmployeeModel.updateOne({ _id: cp._id, sourceCustomer: null, isActive: true }, { $set: { sourceCustomer: customerId } }, { session });
@@ -61,6 +65,7 @@ export const cpCustomerService = {
         });
       } catch (error) {
         await customerDocumentService.revokeLeadConversionUploads(uploads);
+        await customerDocumentService.discardCopiedCpDocuments(copied);
         throw error;
       }
       return { customerId, alreadyConverted: false };
