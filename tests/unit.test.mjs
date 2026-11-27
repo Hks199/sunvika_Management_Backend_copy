@@ -2332,3 +2332,11 @@ test('CP conversion allows only missing document reservations without weakening 
  const doc=type=>({documentType:type,fileName:'document.pdf',mimeType:'application/pdf',fileSize:20});const missing=[doc('ELECTRICITY_BILL'),doc('BANK_PASSBOOK')];
  assert.equal(createCpCustomerUploadsSchema.validate({documents:missing}).error,undefined);assert.ok(createCpCustomerUploadsSchema.validate({documents:[doc('PAN'),doc('PAN')]}).error);assert.ok(createLeadConversionUploadsSchema.validate({documents:missing}).error);
 });
+
+
+test('CP follow-up status updates at the configured interval and scope follows hierarchy',async()=>{
+ const {Types}=await import('mongoose');const {followupStatus,followupScope}=await import('../dist/modules/cp-followups/cp-followup.routes.js');
+ const start=new Date('2026-01-01T12:00:00.000Z');assert.equal(followupStatus(null,start,2,new Date('2026-01-01T13:00:00.000Z')).status,'NOT_FOLLOWED_UP');
+ assert.equal(followupStatus(start,start,2,new Date('2026-01-03T11:59:59.999Z')).status,'FOLLOWED_UP');assert.equal(followupStatus(start,start,2,new Date('2026-01-03T12:00:00.000Z')).status,'DUE');assert.equal(followupStatus(start,start,4,new Date('2026-01-03T12:00:00.000Z')).status,'FOLLOWED_UP');
+ const actor=new Types.ObjectId(),cpRole=new Types.ObjectId();assert.equal(followupScope('RM',actor,cpRole).reportingTo,actor);assert.equal(followupScope('CP_HEAD',actor,cpRole).hierarchyPath,actor);assert.deepEqual(followupScope('MD',actor,cpRole),{role:cpRole,isActive:true});
+});

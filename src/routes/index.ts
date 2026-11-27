@@ -1,4 +1,5 @@
 import {stateImportRouter} from '../modules/state-imports/state-import.routes.js';
+import {cpFollowupRouter} from '../modules/cp-followups/cp-followup.routes.js';
 import { cpImportRouter } from '../modules/cp-imports/cp-import.routes.js';
 import { announcementRouter } from '../modules/announcements/announcement.routes.js';
 import { queryRouter, notificationRouter } from '../modules/queries/query.routes.js';
@@ -30,6 +31,7 @@ apiRouter.get('/', (req, res) => sendSuccess(res, 'Welcome to the Sunvika Manage
   health: `${req.baseUrl}/health`
 }));
 apiRouter.use('/cp-reminders',cpReminderRouter);
+apiRouter.use('/cp-followups',cpFollowupRouter);
 apiRouter.use('/push-devices',pushDeviceRouter);
 
 apiRouter.use('/auth', authRouter);

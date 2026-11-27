@@ -183,3 +183,6 @@ test('CP identity document endpoints require authentication',async()=>{
 
 
 test('CP passport photo preview requires authentication',async()=>{const id='0123456789abcdef01234567';const response=await fetch(`${baseUrl}/api/v1/employees/${id}/identity-documents/PHOTO/preview-url`);assert.equal(response.status,401);});
+
+
+test('CP follow-up settings, list and remarks require authentication',async()=>{const id='0123456789abcdef01234567';for(const [method,path] of [['GET','/cp-followups'],['GET','/cp-followups/settings'],['PATCH','/cp-followups/settings'],['POST',`/cp-followups/${id}`]]){const response=await fetch(`${baseUrl}/api/v1${path}`,{method});assert.equal(response.status,401);}});
