@@ -133,6 +133,31 @@ jobs:
 
           docker build --pull -t sunvika-management-backend:latest .
 
+          # Check both deployment and Docker storage before writing to the server.
+          # A loaded image needs extra room for its layers, in addition to the running image.
+          IMAGE_BYTES="$(docker image inspect sunvika-management-backend:latest --format '{{.Size}}')"
+          ssh -i "$HOME/.ssh/ec2_deploy_key" \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+            "$EC2_USER@$EC2_HOST" bash -s -- "$DEPLOY_PATH" "$IMAGE_BYTES" <<'REMOTE'
+          set -eu
+          deploy_path="$1"
+          image_bytes="$2"
+          docker_root="$(sudo -n docker info --format '{{.DockerRootDir}}')"
+          echo 'EC2 disk usage:'
+          df -h "$deploy_path" "$docker_root"
+          echo 'EC2 inode usage:'
+          df -i "$deploy_path" "$docker_root"
+          deploy_kb="$(df -Pk "$deploy_path" | awk 'NR==2 {print $4}')"
+          docker_kb="$(df -Pk "$docker_root" | awk 'NR==2 {print $4}')"
+          deploy_inodes="$(df -Pi "$deploy_path" | awk 'NR==2 {print $4}')"
+          docker_inodes="$(df -Pi "$docker_root" | awk 'NR==2 {print $4}')"
+          required_kb=$((image_bytes / 1024 * 2 + 262144))
+          if [ "$deploy_kb" -lt 32768 ] || [ "$docker_kb" -lt "$required_kb" ] || [ "$deploy_inodes" -lt 1000 ] || [ "$docker_inodes" -lt 1000 ]; then
+            echo "Insufficient EC2 disk space or inodes for deployment. Inspect df -h, df -i, and sudo docker system df; free space or increase the volume, then retry." >&2
+            exit 1
+          fi
+          REMOTE
+
           dotenv_quote() {
             local value="${1//\\/\\\\}"
             value="${value//\"/\\\"}"
@@ -191,11 +216,13 @@ jobs:
               "umask 077 && cat > '$DEPLOY_PATH/.env.production.next' && mv '$DEPLOY_PATH/.env.production.next' '$DEPLOY_PATH/.env.production'"
           fi
 
-          git archive --format=tar HEAD | gzip -1 |
+          # The image already contains the application. Only copy runtime configuration,
+          # and finish extracting into a temporary directory before changing live files.
+          git archive --format=tar HEAD -- docker-compose.yml nginx deploy | gzip -1 |
             ssh -i "$HOME/.ssh/ec2_deploy_key" \
               -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
               "$EC2_USER@$EC2_HOST" \
-              "mkdir -p '$DEPLOY_PATH' && tar -xzf - -C '$DEPLOY_PATH'"
+              "set -eu; stage=\$(mktemp -d '$DEPLOY_PATH/.deploy.XXXXXX'); trap 'rm -rf \"\$stage\"' EXIT; tar -xzf - -C \"\$stage\"; cp -R \"\$stage\"/. '$DEPLOY_PATH/'"
 
           docker save sunvika-management-backend:latest |
             gzip -1 |
