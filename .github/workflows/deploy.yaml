@@ -143,6 +143,8 @@ jobs:
           deploy_path="$1"
           image_bytes="$2"
           docker_root="$(sudo -n docker info --format '{{.DockerRootDir}}')"
+          # Reclaim only old, untagged Sunvika backend images before the space check.
+          sudo -n docker image prune -f --filter 'label=com.sunvika.component=management-backend' --filter 'until=48h'
           echo 'EC2 disk usage:'
           df -h "$deploy_path" "$docker_root"
           echo 'EC2 inode usage:'
@@ -238,3 +240,28 @@ jobs:
 
           curl --fail --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors \
             --connect-timeout 10 --max-time 20 "$PUBLIC_API_URL/health"
+
+      - name: Clean up old backend images on EC2
+        if: always()
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST || secrets.EC2_HOST || '3.26.18.73' }}
+          EC2_USER: ${{ vars.EC2_USER || secrets.EC2_USER || 'ubuntu' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS || vars.EC2_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$EC2_SSH_KEY" || -z "$EC2_KNOWN_HOSTS" ]]; then
+            echo '::warning::Skipping EC2 image cleanup: SSH key or known hosts is not configured.'
+            exit 0
+          fi
+          key_dir="$(mktemp -d "$RUNNER_TEMP/sunvika-cleanup.XXXXXX")"
+          trap 'rm -rf "$key_dir"' EXIT
+          chmod 700 "$key_dir"
+          printf '%s\n' "$EC2_SSH_KEY" > "$key_dir/key"
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > "$key_dir/known_hosts"
+          chmod 600 "$key_dir/key" "$key_dir/known_hosts"
+          ssh -i "$key_dir/key" -o UserKnownHostsFile="$key_dir/known_hosts" \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+            "$EC2_USER@$EC2_HOST" \
+            "sudo -n docker image prune -f --filter 'label=com.sunvika.component=management-backend' --filter 'until=48h'"

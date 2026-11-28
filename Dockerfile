@@ -16,6 +16,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 FROM node:22-alpine AS runtime
+LABEL com.sunvika.component="management-backend"
 ENV NODE_ENV=production
 WORKDIR /app
 RUN apk add --no-cache dumb-init
